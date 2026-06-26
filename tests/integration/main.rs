@@ -17,6 +17,7 @@ mod common;
 
 mod aggregator;
 mod config;
+mod cred_store;
 mod discovery;
 mod gate;
 mod invoke;
@@ -25,5 +26,8 @@ mod multi_upstream;
 mod namespace_acl;
 mod pinning;
 mod probe;
+mod process_lifetime;
 mod registry;
+mod regression_guard;
 mod reverse_traffic;
+mod timeout_cancellation;

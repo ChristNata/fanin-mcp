@@ -15,6 +15,7 @@
 //! the child).
 
 use std::future::Future;
+use std::process::Stdio as ProcessStdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,22 @@ const NEEDS_SAMPLING: &str = "needs_sampling";
 const ECHO_IMAGE: &str = "echo_image";
 const NEEDS_ELICITATION: &str = "needs_elicitation";
 const NEEDS_ROOTS: &str = "needs_roots";
+/// `echo_env` — Phase 3. Echoes the requested env var's value (or "<absent>")
+/// from the probe's visible environment. Used by the per-upstream env
+/// isolation proof: the probe reports which env keys it can see, so a
+/// sibling/ambient var that leaked through fails the test.
+const ECHO_ENV: &str = "echo_env";
+/// `spawn_grandchild` — Phase 3 hard-kill orphan proof. Spawns a long-lived
+/// descendant process and writes a stable marker file (the descendant's PID
+/// on Unix, or a stable marker path on Windows) so the test can observe
+/// whether the descendant survived fanin-mcp's force-kill. The grandchild
+/// sleeps for GRANDCHILD_LIFETIME_SECS so the marker remains observable
+/// after the parent tree is killed.
+const SPAWN_GRANDCHILD: &str = "spawn_grandchild";
+/// How long the spawned grandchild sleeps before exiting on its own. Must
+/// exceed the cleanup interval the hard-kill test waits after killing
+/// fanin-mcp.
+const GRANDCHILD_LIFETIME_SECS: u64 = 30;
 const SAMPLING_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The probe server fixture.
@@ -87,7 +104,9 @@ impl ServerHandler for Probe {
     }
 }
 
-/// Build the eight probe tool definitions.
+/// Build the ten probe tool definitions (D-016, master.md §P0.3).
+///
+/// Fully static — no upstream fan-out.
 fn probe_tools() -> Vec<Tool> {
     vec![
         echo_ok_tool(),
@@ -98,6 +117,8 @@ fn probe_tools() -> Vec<Tool> {
         echo_image_tool(),
         needs_elicitation_tool(),
         needs_roots_tool(),
+        echo_env_tool(),
+        spawn_grandchild_tool(),
     ]
 }
 
@@ -203,6 +224,60 @@ fn needs_roots_tool() -> Tool {
     )
 }
 
+/// `echo_env` — `key` string; echoes the value of the env var named `key` as
+/// visible to the probe process, or the literal "<absent>" if the var is not
+/// set. Used by the Phase 3 per-upstream env isolation proof: the test
+/// configures different env keys on sibling servers and asserts each probe
+/// sees ONLY its own keys (D-010 least-privilege).
+fn echo_env_tool() -> Tool {
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".into()),
+    );
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "key".to_string(),
+        serde_json::json!({ "type": "string", "description": "Env var name to read." }),
+    );
+    schema.insert("properties".to_string(), serde_json::Value::Object(props));
+    Tool::new(
+        ECHO_ENV,
+        "Echoes the value of the env var named `key` as visible to this process.",
+        Arc::new(schema),
+    )
+}
+
+/// `spawn_grandchild` — `marker_path` string; spawns a long-lived descendant
+/// process and writes a marker file at `marker_path` so the Phase 3 hard-kill
+/// orphan test can observe whether the descendant survived fanin-mcp's
+/// force-kill (D-009, GOTCHA #11/#14). The grandchild sleeps for
+/// GRANDCHILD_LIFETIME_SECS and then removes the marker on a clean exit; a
+/// contained process tree (Job Object / process group) kills the grandchild
+/// before the lifetime expires, so the marker disappears (or never appears).
+fn spawn_grandchild_tool() -> Tool {
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".into()),
+    );
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "marker_path".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Path where the grandchild writes its presence marker."
+        }),
+    );
+    schema.insert("properties".to_string(), serde_json::Value::Object(props));
+    Tool::new(
+        SPAWN_GRANDCHILD,
+        "Spawns a long-lived descendant process and writes a presence marker; \
+         used by the hard-kill orphan proof.",
+        Arc::new(schema),
+    )
+}
+
 /// Build a JSON-schema object with optional string properties.
 fn optional_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
     let mut schema = serde_json::Map::new();
@@ -253,6 +328,8 @@ async fn dispatch(
         ECHO_IMAGE => echo_image(),
         NEEDS_ELICITATION => needs_elicitation(context),
         NEEDS_ROOTS => needs_roots(context),
+        ECHO_ENV => echo_env(arguments),
+        SPAWN_GRANDCHILD => spawn_grandchild(arguments).await,
         _ => unknown_tool_result(name),
     }
 }
@@ -420,14 +497,122 @@ fn build_roots_request() -> ServerRequest {
     ServerRequest::ListRootsRequest(ListRootsRequest::default())
 }
 
+/// `echo_env`: read the env var named `key` from the probe's visible
+/// environment and echo its value, or "<absent>" if unset. The probe never
+/// invents a value; a missing key is reported honestly. Used by the Phase 3
+/// per-upstream env isolation proof (D-010).
+fn echo_env(arguments: Option<serde_json::Value>) -> CallToolResult {
+    let key = arguments
+        .as_ref()
+        .and_then(|a| a.get("key"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
+    let value = std::env::var(key).unwrap_or_else(|_| "<absent>".to_string());
+    CallToolResult::success(vec![Content::text(value)])
+}
+
+/// `spawn_grandchild`: spawn a long-lived descendant process that writes a
+/// presence marker at `marker_path` and sleeps for
+/// GRANDCHILD_LIFETIME_SECS. The descendant re-execs the probe binary
+/// itself in a "grandchild" mode (detected by a private argv sentinel),
+/// which sleeps and then removes the marker on a clean exit. A contained
+/// process tree (Job Object / process group) kills the descendant before
+/// the lifetime expires, so the marker disappears; an uncontained tree
+/// leaves the orphan alive and the marker persists — the failure the
+/// hard-kill orphan test catches.
+///
+/// The grandchild is spawned with stdin/stdout/stderr inherited (or null)
+/// so it does NOT touch the probe's MCP stdio stream (GOTCHA #1).
+async fn spawn_grandchild(arguments: Option<serde_json::Value>) -> CallToolResult {
+    let marker_path = arguments
+        .as_ref()
+        .and_then(|a| a.get("marker_path"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    if marker_path.is_empty() {
+        return CallToolResult::error(vec![Content::text(
+            "spawn_grandchild requires a non-empty marker_path".to_string(),
+        )]);
+    }
+
+    // Re-exec the probe binary itself in grandchild mode. The sentinel argv
+    // `__grandchild__` plus the marker path and lifetime make the grandchild
+    // branch of `main` sleep for the lifetime and remove the marker on exit.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            return CallToolResult::error(vec![Content::text(format!(
+                "spawn_grandchild: failed to resolve current_exe: {e}"
+            ))]);
+        }
+    };
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg(GRANDCHILD_SENTINEL)
+        .arg(marker_path)
+        .arg(GRANDCHILD_LIFETIME_SECS.to_string())
+        .stdin(ProcessStdio::null())
+        .stdout(ProcessStdio::null())
+        .stderr(ProcessStdio::null());
+
+    // Detach the grandchild so the probe's call_tool returns immediately.
+    // The grandchild writes the marker before sleeping; on a clean exit
+    // (lifetime elapsed, tree NOT killed) it removes the marker.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the grandchild is
+        // not tied to the probe's console and can survive a plain kill of
+        // the probe — the containment layer must catch it instead.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    match cmd.spawn() {
+        Ok(_child) => {
+            // Do NOT wait on the child — it must outlive the probe's
+            // call_tool return. Drop the handle; the OS owns the lifetime.
+            // The marker is written by the grandchild before it sleeps; give
+            // it a brief moment to land so the test can observe it promptly.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            CallToolResult::success(vec![Content::text(format!(
+                "spawn_grandchild: descendant started, marker at {marker_path}"
+            ))])
+        }
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "spawn_grandchild: failed to spawn descendant: {e}"
+        ))]),
+    }
+}
+
+/// The private argv sentinel that selects the grandchild branch of `main`.
+/// Picked to be implausible as a real subcommand so it never collides with
+/// the normal CLI surface.
+const GRANDCHILD_SENTINEL: &str = "__grandchild__";
+
 /// Structured unknown-tool result — never a JSON-RPC error (D-005).
 fn unknown_tool_result(tool: String) -> CallToolResult {
     CallToolResult::error(vec![Content::text(format!("unknown probe tool: {tool}"))])
 }
 
 /// Entry point. Initializes tracing to stderr (GOTCHA #1) and serves over stdio.
+///
+/// The grandchild sentinel branch (`__grandchild__ <marker_path> <secs>`) is
+/// the detached descendant spawned by `spawn_grandchild` for the Phase 3
+/// hard-kill orphan proof. It writes the marker, sleeps for the requested
+/// lifetime, and removes the marker on a clean exit — so a contained process
+/// tree (Job Object / process group) that kills the grandchild before the
+/// lifetime elapses makes the marker disappear, while an uncontained tree
+/// leaves the orphan alive and the marker persists.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Grandchild sentinel branch: re-exec'd by `spawn_grandchild`. Must run
+    // BEFORE tracing/serve setup so it never touches the MCP stdio stream.
+    if let Some(args) = parse_grandchild_args() {
+        return run_grandchild(args.marker_path, args.lifetime).await;
+    }
+
     init_tracing();
 
     let probe = Probe;
@@ -444,6 +629,46 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
+    std::process::ExitCode::SUCCESS
+}
+
+/// Parsed grandchild-mode arguments.
+struct GrandchildArgs {
+    marker_path: String,
+    lifetime: Duration,
+}
+
+/// If argv[1] is the grandchild sentinel, parse the rest into a
+/// [`GrandchildArgs`]; otherwise return `None` (normal probe-server mode).
+fn parse_grandchild_args() -> Option<GrandchildArgs> {
+    let mut args = std::env::args().skip(1);
+    let first = args.next()?;
+    if first != GRANDCHILD_SENTINEL {
+        return None;
+    }
+    let marker_path = args.next()?;
+    let secs: u64 = args.next()?.parse().ok()?;
+    Some(GrandchildArgs {
+        marker_path,
+        lifetime: Duration::from_secs(secs),
+    })
+}
+
+/// Run the grandchild branch: write the presence marker, sleep for `lifetime`,
+/// then remove the marker and exit cleanly. A force-kill of the process tree
+/// (Job Object / process group) terminates this process before the sleep
+/// elapses, so the marker is NOT removed — the test observes the marker's
+/// presence or absence to decide containment.
+async fn run_grandchild(marker_path: String, lifetime: Duration) -> std::process::ExitCode {
+    // Write the marker first; if this fails, exit non-zero so the test sees
+    // the marker is absent (the grandchild never started cleanly).
+    if let Err(e) = std::fs::write(&marker_path, std::process::id().to_string()) {
+        eprintln!("grandchild: failed to write marker {marker_path}: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
+    tokio::time::sleep(lifetime).await;
+    // Clean exit: remove the marker so a re-run does not see a stale file.
+    let _ = std::fs::remove_file(&marker_path);
     std::process::ExitCode::SUCCESS
 }
 

@@ -3,15 +3,15 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "THOROUGH",
-  "current_step": "test-create",
+  "current_step": "implement",
   "steps": {
     "plan": {
       "status": "complete",
       "at": "2026-06-27T00:50:00Z"
     },
     "test-create": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T01:20:00Z"
     },
     "implement": {
       "status": "pending",

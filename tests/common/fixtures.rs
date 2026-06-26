@@ -439,3 +439,199 @@ pub fn empty_log_file_path() -> String {
         .unwrap_or_else(|e| panic!("failed to create log file at {}: {e}", dir.display()));
     dir.to_string_lossy().into_owned()
 }
+
+// ---- Phase 3 credentials + timeout + lifetime fixtures ---------------------
+
+/// A unique-marker counter for sentinel secret values and grandchild marker
+/// paths. Keeps parallel Phase 3 tests from colliding on the same env var
+/// name or marker file under cargo's default parallel execution.
+static PHASE3_MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A per-call unique integer used to derive unique env-var names, marker
+/// paths, and sentinel values so concurrent Phase 3 tests do not collide.
+pub fn phase3_unique_seq() -> u64 {
+    PHASE3_MARKER_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A Phase 3 server entry — extends the Phase 2 [`ServerEntry`] with the
+/// `timeout_secs`, `env`, and `env_keys` fields Phase 3 exercises.
+///
+/// `timeout_secs` is the per-server upstream call timeout (SC12/13).
+/// `env` is a list of `(key, value)` pairs rendered as a
+/// `[servers.<name>.env]` sub-table; values may carry `${VAR}` placeholders
+/// for the interpolation proof (SC8) or be literal non-secrets (SC10).
+/// `env_keys` is an explicit allow-list of env var names the server should
+/// receive — when non-empty, the rendered config uses the
+/// `[servers.<name>.env_keys]` array form so the implementer can inject ONLY
+/// those keys from the resolved credential/env store (SC9 isolation). When
+/// empty, the rendered config uses the literal `env` map form.
+#[allow(dead_code)] // pub fixture API: not every test uses every field.
+#[derive(Debug, Clone)]
+pub struct Phase3ServerEntry {
+    /// The `[servers.<name>]` key.
+    pub name: String,
+    /// Per-server call timeout in seconds. `None` => omit (default 60).
+    pub timeout_secs: Option<u64>,
+    /// Literal env vars rendered as `[servers.<name>.env]`. Values may carry
+    /// `${VAR}` placeholders.
+    pub env: Vec<(String, String)>,
+    /// Optional per-server log sink.
+    pub log_file: Option<String>,
+}
+
+impl Phase3ServerEntry {
+    /// A server entry with no env, no timeout, no log file.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            timeout_secs: None,
+            env: Vec::new(),
+            log_file: None,
+        }
+    }
+
+    /// Set the per-server `timeout_secs`.
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = Some(secs);
+        self
+    }
+
+    /// Attach a per-server log sink.
+    pub fn with_log_file(mut self, log_file: impl Into<String>) -> Self {
+        self.log_file = Some(log_file.into());
+        self
+    }
+
+    /// Add a literal env var (key, value). Values may carry `${VAR}`.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+}
+
+/// A builder for a Phase 3 TOML config. Extends the Phase 2
+/// [`MultiConfigBuilder`] surface with `timeout_secs` and `env` per server.
+/// Namespaces reuse the Phase 2 [`NamespaceEntry`].
+///
+/// The rendered TOML is a strict superset of the Phase 2 shape; the
+/// implementer's Phase 2 parser must already accept it, and Phase 3 adds
+/// parsing of `timeout_secs` and the interpolation-aware `env` values.
+#[allow(dead_code)] // pub fixture API: not every test uses every field.
+#[derive(Debug, Clone, Default)]
+pub struct Phase3ConfigBuilder {
+    servers: Vec<Phase3ServerEntry>,
+    namespaces: Vec<NamespaceEntry>,
+}
+
+#[allow(dead_code)] // pub fixture API: not every test uses every method.
+impl Phase3ConfigBuilder {
+    /// Start a fresh empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a Phase 3 server entry.
+    pub fn server(mut self, entry: Phase3ServerEntry) -> Self {
+        self.servers.push(entry);
+        self
+    }
+
+    /// Add a namespace entry (Phase 2 shape, reused).
+    pub fn namespace(mut self, entry: NamespaceEntry) -> Self {
+        self.namespaces.push(entry);
+        self
+    }
+
+    /// Render the TOML to a string.
+    pub fn to_toml(&self) -> String {
+        let mut s = String::new();
+        let probe = probe_bin_path();
+
+        for entry in &self.servers {
+            s.push_str(&format!("[servers.{}]\n", entry.name));
+            s.push_str("transport = \"stdio\"\n");
+            s.push_str(&format!("command = '{}'\n", escape_literal(&probe)));
+            s.push_str("args = []\n");
+            if let Some(secs) = entry.timeout_secs {
+                s.push_str(&format!("timeout_secs = {secs}\n"));
+            }
+            if !entry.env.is_empty() {
+                s.push_str(&format!("[servers.{}.env]\n", entry.name));
+                for (k, v) in &entry.env {
+                    // Basic-string escape: backslashes and double quotes.
+                    let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+                    s.push_str(&format!("{k} = \"{escaped}\"\n"));
+                }
+            }
+            if let Some(log) = &entry.log_file {
+                s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
+            }
+            s.push('\n');
+        }
+
+        for ns in &self.namespaces {
+            s.push_str(&format!("[namespaces.{}]\n", ns.name));
+            let quoted: Vec<String> = ns.servers.iter().map(|n| format!("\"{n}\"")).collect();
+            s.push_str(&format!("servers = [{}]\n", quoted.join(", ")));
+            if !ns.tools.is_empty() {
+                s.push_str(&format!("[namespaces.{}.tools]\n", ns.name));
+                for (server, tools) in &ns.tools {
+                    let quoted_tools: Vec<String> =
+                        tools.iter().map(|t| format!("\"{t}\"")).collect();
+                    s.push_str(&format!("{} = [{}]\n", server, quoted_tools.join(", ")));
+                }
+            }
+            s.push('\n');
+        }
+
+        s
+    }
+
+    /// Write the config to a temp file and return the path. The temp file
+    /// stays alive for the lifetime of the returned [`ConfigFile`].
+    pub fn write(self) -> ConfigFile {
+        let toml = self.to_toml();
+        let mut tmp =
+            NamedTempFile::new().expect("failed to create temp config file in OS tmp dir");
+        tmp.write_all(toml.as_bytes())
+            .expect("failed to write Phase 3 config to temp file");
+        tmp.as_file().sync_all().ok();
+        let path = tmp.path().to_path_buf();
+        ConfigFile { _file: tmp, path }
+    }
+}
+
+/// A unique marker file path for the Phase 3 hard-kill orphan proof. Each
+/// call returns a distinct path under the OS temp dir; the path is created
+/// (truncated) so a stale file from a previous run does not pollute the
+/// assertion. The grandchild process writes its PID here; a contained tree
+/// removes it (kill before lifetime), an uncontained tree leaves it.
+pub fn grandchild_marker_path() -> String {
+    let seq = phase3_unique_seq();
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "fanin-mcp-phase3-grandchild-{}-{}.marker",
+        std::process::id(),
+        seq
+    ));
+    // Remove any stale marker so the test starts from a known-clean state.
+    let _ = std::fs::remove_file(&dir);
+    dir.to_string_lossy().into_owned()
+}
+
+/// A unique env-var name for the Phase 3 per-upstream isolation proof. Each
+/// call returns a distinct name so concurrent tests do not collide on the
+/// same env var.
+pub fn phase3_env_var_name(prefix: &str) -> String {
+    let seq = phase3_unique_seq();
+    format!("FANIN_TEST_{prefix}_{seq}")
+}
+
+/// A unique sentinel secret value for the Phase 3 redaction proof. The
+/// sentinel is distinctive enough that a substring search of any log sink
+/// is unambiguous, and unique per call so parallel tests do not confuse
+/// each other's sentinel.
+pub fn phase3_sentinel_value() -> String {
+    let seq = phase3_unique_seq();
+    format!("SENTINEL-SECRET-DO-NOT-LEAK-{seq}-ZXCV")
+}

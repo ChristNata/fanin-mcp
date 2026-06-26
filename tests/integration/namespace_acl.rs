@@ -26,8 +26,9 @@ use crate::common::fixtures as fx;
 /// Deadline for a meta-tool call that may trigger a lazy spawn.
 const ACL_DEADLINE: Duration = Duration::from_secs(15);
 
-/// The exact set of probe tool names (mirrors discovery.rs).
-const PROBE_TOOL_NAMES: [&str; 8] = [
+/// The exact set of probe tool names (mirrors discovery.rs). Phase 3 extends
+/// the probe with `echo_env` and `spawn_grandchild`, bringing the total to 10.
+const PROBE_TOOL_NAMES: [&str; 10] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -36,6 +37,8 @@ const PROBE_TOOL_NAMES: [&str; 8] = [
     "echo_image",
     "needs_elicitation",
     "needs_roots",
+    "echo_env",
+    "spawn_grandchild",
 ];
 
 /// Extract the text content of a list_tools result as a JSON array of rows.
@@ -346,7 +349,7 @@ async fn tool_level_acl_filters_list_schema_and_invoke() {
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), Some("filtered")).await;
     common::initialize(&mut child).await;
 
-    // list_tools: alpha rows contain ONLY echo_ok; beta rows contain ALL eight
+    // list_tools: alpha rows contain ONLY echo_ok; beta rows contain ALL ten
     // probe tools (no tools entry => all visible).
     let list = timeout(
         ACL_DEADLINE,

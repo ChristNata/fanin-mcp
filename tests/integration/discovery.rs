@@ -6,7 +6,7 @@
 //!
 //! These replace the Phase 0 "not-implemented" stub behavior for the
 //! discovery meta-tools with live inventory reads from the lazy-cached
-//! upstream. The probe exposes exactly eight tools (`echo_ok`, `always_error`,
+//! upstream. The probe exposes exactly ten tools (`echo_ok`, `always_error`,
 //! `slow_tool`, `dangerous_noop`, `needs_sampling`, `echo_image`,
 //! `needs_elicitation`, `needs_roots`); `list_tools` must return
 //! one row per probe tool, and `get_tool_schema probe__echo_ok` must return
@@ -25,7 +25,9 @@ use crate::common::fixtures as fx;
 const DISCOVER_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The exact set of probe tool names (mirrors `tests/integration/probe.rs`).
-const PROBE_TOOL_NAMES: [&str; 8] = [
+/// Phase 3 extends the probe with `echo_env` and `spawn_grandchild`, bringing
+/// the total to 10.
+const PROBE_TOOL_NAMES: [&str; 10] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -34,6 +36,8 @@ const PROBE_TOOL_NAMES: [&str; 8] = [
     "echo_image",
     "needs_elicitation",
     "needs_roots",
+    "echo_env",
+    "spawn_grandchild",
 ];
 
 /// Helper: spawn the aggregator with the canonical Phase 1 config and
@@ -49,7 +53,7 @@ async fn phase1_child() -> common::JsonRpcChild {
 /// parse it as a JSON array of row objects. The implementer may choose the
 /// exact row shape; we assert the load-bearing fields: each row carries a
 /// `tool` name (and likely a `server`), and the set of tool names matches
-/// the probe's eight. See `tests.md` §Schema choices for the row shape.
+/// the probe's ten. See `tests.md` §Schema choices for the row shape.
 fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
     let content = result
         .get("content")
@@ -87,7 +91,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
 }
 
 /// Master criterion 6 / P4.SC1: `list_tools` meta-tool returns the probe
-/// server's tool rows for the active namespace. The eight probe tool names
+/// server's tool rows for the active namespace. The ten probe tool names
 /// must all appear in the returned rows.
 #[tokio::test]
 async fn list_tools_returns_probe_tool_rows() {
@@ -134,7 +138,7 @@ async fn list_tools_returns_probe_tool_rows() {
     assert_eq!(
         tool_names.len(),
         PROBE_TOOL_NAMES.len(),
-        "list_tools must return exactly the eight probe tool rows; got {tool_names:?}"
+        "list_tools must return exactly the ten probe tool rows; got {tool_names:?}"
     );
 
     child.into_guard().shutdown().await.ok();
@@ -142,7 +146,7 @@ async fn list_tools_returns_probe_tool_rows() {
 
 /// Master criterion 6 / P4.SC2: `list_tools` with a specific configured
 /// server returns only that server's rows. Passing `server: "probe"` must
-/// return the same eight rows (the only configured server); the filter must
+/// return the same ten rows (the only configured server); the filter must
 /// not drop any.
 #[tokio::test]
 async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
@@ -167,7 +171,7 @@ async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
     let rows = parse_list_tools_rows(&result);
 
     // Every row must belong to the `probe` server (if the row carries a
-    // `server` field). The tool set is still the eight probe tools.
+    // `server` field). The tool set is still the ten probe tools.
     for row in &rows {
         if let Some(srv) = row.get("server").and_then(|s| s.as_str()) {
             assert_eq!(
@@ -188,7 +192,7 @@ async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
     assert_eq!(
         tool_names.len(),
         PROBE_TOOL_NAMES.len(),
-        "filtered list_tools for the only configured server must still return eight rows"
+        "filtered list_tools for the only configured server must still return ten rows"
     );
 
     child.into_guard().shutdown().await.ok();

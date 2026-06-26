@@ -60,6 +60,16 @@ impl ChildGuard {
             }
         }
     }
+
+    /// Force-kill the child immediately (no stdin EOF, no clean-shutdown
+    /// path) and wait for it to be reaped. Used by the Phase 3 hard-kill
+    /// orphan test, which must simulate a forceful termination of
+    /// fanin-mcp (e.g. `taskkill /F`, `kill -9`) to prove the containment
+    /// layer kills the full upstream tree.
+    pub async fn kill_and_wait(mut self) {
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
+    }
 }
 
 impl Drop for ChildGuard {
@@ -430,6 +440,132 @@ pub async fn list_tools(child: &mut JsonRpcChild) -> Value {
     child
         .request("tools/list", Value::Object(Default::default()))
         .await
+}
+
+// ---- Phase 3 CLI `cred` helpers --------------------------------------------
+//
+// The credential subcommands run outside the MCP stdio server. Tests invoke
+// `fanin-mcp cred set|list|rm <server> <KEY>` as a child process and feed
+// the secret through the child's stdin pipe (never argv). These helpers
+// spawn the CLI, optionally write to its stdin, and collect stdout + stderr
+// + exit status within a bounded deadline so a hang fails the test fast.
+
+/// A completed CLI child: captured stdout, captured stderr, and exit status.
+pub struct CliOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub status: Option<std::process::ExitStatus>,
+}
+
+/// Spawn `fanin-mcp` with the given argv (after the bin name) and an optional
+/// stdin payload. Waits for exit up to `deadline`, then force-kills. Returns
+/// the captured stdout/stderr/exit status. Used by `cred set|list|rm` tests
+/// and any startup-failure test that needs raw argv control.
+///
+/// `stdin_payload` is written to the child's stdin and the pipe is closed
+/// (EOF) before waiting for exit. `None` means no stdin write (pipe closed
+/// immediately).
+pub async fn run_fanin_cli(
+    args: &[String],
+    stdin_payload: Option<&str>,
+    deadline: Duration,
+) -> CliOutput {
+    let path = std::env::var("CARGO_BIN_EXE_fanin-mcp").unwrap_or_else(|_| {
+        panic!(
+            "cargo did not inject CARGO_BIN_EXE_fanin-mcp; the [[bin]] target \
+             `fanin-mcp` must be built before the test binary runs"
+        )
+    });
+    let mut cmd = Command::new(&path);
+    cmd.args(args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn fanin-mcp CLI: {e}"));
+
+    // Write stdin payload (if any) and close the pipe.
+    if let Some(payload) = stdin_payload {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(payload.as_bytes()).await;
+            let _ = stdin.flush().await;
+            // drop stdin => EOF
+        }
+    } else {
+        // Close stdin immediately so a hidden prompt does not block forever.
+        child.stdin.take();
+    }
+
+    // `wait_with_output` consumes the child; capture the kill handle first
+    // so the timeout path can force-kill the orphaned process.
+    let raw_child_id = child.id();
+    let wait = tokio::time::timeout(deadline, child.wait_with_output());
+    match wait.await {
+        Ok(Ok(out)) => CliOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            status: Some(out.status),
+        },
+        Ok(Err(e)) => {
+            if let Some(id) = raw_child_id {
+                let _ = kill_process_by_id(id);
+            }
+            CliOutput {
+                stdout: String::new(),
+                stderr: format!("failed to wait for fanin-mcp CLI: {e}"),
+                status: None,
+            }
+        }
+        Err(_) => {
+            if let Some(id) = raw_child_id {
+                let _ = kill_process_by_id(id);
+            }
+            CliOutput {
+                stdout: String::new(),
+                stderr: "fanin-mcp CLI did not exit within deadline".to_string(),
+                status: None,
+            }
+        }
+    }
+}
+
+/// Best-effort platform kill of a process by its PID. Used by the CLI
+/// timeout path after `wait_with_output` has consumed the `Child` handle.
+/// Logs failure to stderr via `eprintln` (this is test-only plumbing, not
+/// the MCP transport path).
+fn kill_process_by_id(pid: u32) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string(), "/T"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::other("taskkill exited non-zero"));
+        }
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let mut cmd = std::process::Command::new("kill");
+        cmd.args(["-9", &pid.to_string()]);
+        // Avoid spawning a shell; exec directly. If exec fails, fall through.
+        let _ = cmd.exec();
+        Ok(())
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "kill_process_by_id not implemented on this platform",
+        ))
+    }
 }
 
 pub mod expectations;

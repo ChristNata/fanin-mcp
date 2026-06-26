@@ -16,8 +16,10 @@ use tokio::time::timeout;
 
 use crate::common;
 
-/// The exact, ordered set of probe tool names (master criterion 7).
-const PROBE_TOOL_NAMES: [&str; 8] = [
+/// The exact, ordered set of probe tool names (master criterion 7). Phase 3
+/// extends the probe with `echo_env` (env isolation proof) and
+/// `spawn_grandchild` (hard-kill orphan proof), bringing the total to 10.
+const PROBE_TOOL_NAMES: [&str; 10] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -26,6 +28,8 @@ const PROBE_TOOL_NAMES: [&str; 8] = [
     "echo_image",
     "needs_elicitation",
     "needs_roots",
+    "echo_env",
+    "spawn_grandchild",
 ];
 
 fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -62,7 +66,7 @@ async fn probe_builds_and_runs_over_stdio_without_node() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// Criterion 7 (Probe inventory gate): the probe exposes exactly eight tools
+/// Criterion 7 (Probe inventory gate): the probe exposes exactly ten tools
 /// over stdio: echo_ok, always_error, slow_tool, dangerous_noop,
 /// needs_sampling, echo_image, needs_elicitation, needs_roots (D-016,
 /// master.md §P0.3).
@@ -81,8 +85,8 @@ async fn probe_exposes_exactly_eight_named_tools() {
 
     assert_eq!(
         tools.len(),
-        8,
-        "probe must expose exactly 8 tools, got {}: {tools:?}",
+        10,
+        "probe must expose exactly 10 tools, got {}: {tools:?}",
         tools.len()
     );
     for name in PROBE_TOOL_NAMES {

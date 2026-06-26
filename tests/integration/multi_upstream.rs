@@ -49,7 +49,9 @@ const SLOW_DELAY_MS: u64 = 800;
 const PROOF_DEADLINE: Duration = Duration::from_millis(400);
 
 /// The exact set of probe tool names (mirrors `tests/integration/discovery.rs`).
-const PROBE_TOOL_NAMES: [&str; 8] = [
+/// Phase 3 extends the probe with `echo_env` and `spawn_grandchild`, bringing
+/// the total to 10.
+const PROBE_TOOL_NAMES: [&str; 10] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -58,6 +60,8 @@ const PROBE_TOOL_NAMES: [&str; 8] = [
     "echo_image",
     "needs_elicitation",
     "needs_roots",
+    "echo_env",
+    "spawn_grandchild",
 ];
 
 /// Build a two-upstream (alpha + beta) config with a `default` namespace that
@@ -508,7 +512,7 @@ async fn multi_upstream_preserves_phase0_phase1_guarantees() {
     exp::assert_exact_meta_tools(tools);
 
     // Live discovery across all three upstreams: list_tools returns rows from
-    // alpha, beta, AND gamma (3 x 8 = 24 rows). Proves multi-upstream
+    // alpha, beta, AND gamma (3 x 10 = 30 rows). Proves multi-upstream
     // discovery composes without leaking into the static downstream surface.
     let list = timeout(
         SPAWN_DEADLINE,
@@ -529,11 +533,11 @@ async fn multi_upstream_preserves_phase0_phase1_guarantees() {
         );
     }
     let rows = parse_list_tools_rows(&list_result);
-    // Each upstream contributes the eight probe tools; total = 24 rows.
+    // Each upstream contributes the ten probe tools; total = 30 rows.
     assert_eq!(
         rows.len(),
         PROBE_TOOL_NAMES.len() * 3,
-        "3-upstream list_tools must return 24 rows (3 servers x 8 tools); got {} rows",
+        "3-upstream list_tools must return 30 rows (3 servers x 10 tools); got {} rows",
         rows.len()
     );
     // Every row's server field must be one of alpha/beta/gamma, and each
