@@ -13,7 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
@@ -42,11 +42,15 @@ impl ChildGuard {
         let wait = timeout(Duration::from_secs(1), self.child.wait()).await;
         match wait {
             Ok(status) => {
+                // `status` is the INNER io::Result<ExitStatus>; `?` propagates a
+                // wait/io error to the caller, matching the intended semantics:
+                // clean exit observed within 1s -> Ok(Some(status)); wait error
+                // -> propagated; outer timeout (Elapsed) handled below.
                 if status.is_ok() {
-                    return Ok(Some(status));
+                    return Ok(Some(status?));
                 }
                 let _ = self.child.kill().await;
-                Ok(Some(status))
+                Ok(Some(status?))
             }
             Err(_) => {
                 let _ = self.child.kill().await;
@@ -173,6 +177,7 @@ impl JsonRpcChild {
 
     /// Take the stderr stream so a test can inspect diagnostics. Only the first
     /// caller gets a stream; later callers get None.
+    #[allow(dead_code)] // pub harness API for future phases; no Phase 0 test uses it yet.
     pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
         self._stderr.take()
     }
@@ -192,13 +197,12 @@ impl JsonRpcChild {
 
 /// Spawn a bin target by cargo bin name and speak JSON-RPC over its stdio.
 ///
-/// `bin` is the `[[bin]] name = "..."` value, NOT the cargo env var suffix.
-/// The env var cargo injects is `CARGO_BIN_EXE_<BIN_UPPER_UNDERSCORE>`.
+/// `bin` is the `[[bin]] name = "..."` value, passed verbatim. Cargo injects
+/// `CARGO_BIN_EXE_<name>` using the bin name EXACTLY as-declared — case and
+/// hyphens preserved (e.g. bin `probe-server` -> `CARGO_BIN_EXE_probe-server`).
+/// Do not uppercase or transform; that breaks resolution on every platform.
 pub async fn spawn_bin(bin: &str) -> JsonRpcChild {
-    let env_key = format!(
-        "CARGO_BIN_EXE_{}",
-        bin.replace('-', "_").to_uppercase()
-    );
+    let env_key = format!("CARGO_BIN_EXE_{bin}");
     let path = std::env::var(&env_key).unwrap_or_else(|_| {
         panic!(
             "cargo did not inject {env_key}; the test harness relies on the \
@@ -315,7 +319,7 @@ pub fn assert_is_error_result(result: &Value, ctx: &str) {
         "{ctx}: content must be an array"
     );
     assert!(
-        content.as_array().unwrap().len() >= 1,
+        !content.as_array().unwrap().is_empty(),
         "{ctx}: not-implemented error must carry at least one content block"
     );
 }

@@ -1,0 +1,84 @@
+[package]
+name = "fanin-mcp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "A standalone, stdio-native MCP proxy that federates many upstream MCP servers behind a single endpoint."
+publish = false
+
+# Auto-discovery is disabled so the two binary targets and the single
+# integration test target are fully explicit. Without this, cargo would
+# auto-discover `src/main.rs` as a bin (colliding with the explicit
+# `[[bin]] name = "fanin-mcp"` below) and could mis-scan files under
+# `tests/`. The probe fixture lives under `tests/probe-server/` but is a
+# `[[bin]]` target, not a test target; `autotests = false` ensures cargo
+# never treats anything under `tests/` as an integration test except the
+# one declared `[[test]]` below.
+autobins = false
+autotests = false
+
+[dependencies]
+# rmcp — the official MCP Rust SDK, server and client roles in one process.
+# D-015: pinned EXACTLY with `=x.y.z`; `Cargo.lock` is committed. The rmcp
+# API moves fast; the pin prevents implementers from fighting the compiler
+# with stale signatures. Features: `server` + `client` (dual role),
+# `macros` (the `#[tool]` attribute macro), `transport-io` (server-side
+# stdio), `transport-child-process` (client-side stdio over a spawned
+# child — used in later phases to connect to upstreams).
+rmcp = { version = "=1.8.0", default-features = false, features = [
+    "server",
+    "client",
+    "macros",
+    "transport-io",
+    "transport-child-process",
+] }
+
+# Tokio full — the async runtime. Later phases exercise process spawning,
+# io, sync, time; `full` keeps the feature set stable across phases so
+# Cargo.toml is not churned by P0.2/P0.3.
+tokio = { version = "1", features = ["full"] }
+
+# Serialization + CLI + diagnostics + schema generation.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# schemars is pulled transitively by rmcp's `server` feature, but it is also
+# a direct build-time input for tool input-schema generation in P0.2, so it
+# is declared explicitly here.
+schemars = "0.8"
+
+[dev-dependencies]
+# Explicit dev-deps so the integration test binary is self-contained per
+# tests.md. The main crate's `tokio = { features = ["full"] }` unifies with
+# this narrower feature set; the dev-dep declaration documents the test
+# binary's actual requirements.
+tokio = { version = "1", features = [
+    "process",
+    "io-util",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "time",
+] }
+serde_json = "1"
+
+# --- Explicit target declarations --------------------------------------------
+# With `autobins = false` / `autotests = false` above, these are the only
+# build targets cargo sees. The probe bin name MUST be `probe-server` so
+# cargo injects `CARGO_BIN_EXE_PROBE_SERVER` for the integration tests'
+# `spawn_bin("probe-server")` (D-016, tests.md).
+
+[[bin]]
+name = "fanin-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "probe-server"
+path = "tests/probe-server/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

@@ -15,7 +15,6 @@ use serde_json::Value;
 use tokio::time::timeout;
 
 use crate::common;
-use crate::common::expectations as exp;
 
 /// The exact, ordered set of probe tool names (master criterion 7).
 const PROBE_TOOL_NAMES: [&str; 5] = [
@@ -33,7 +32,7 @@ fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
 /// Criterion 6 (Probe build/run gate): the probe fixture builds and runs
 /// standalone over stdio with no Node or npx. This test spawns it via the
 /// cargo-injected path and proves the binary answers initialize — the build
-//! itself is enforced by the cargo build/clippy gate (criterion 1), and the
+/// itself is enforced by the cargo build/clippy gate (criterion 1), and the
 /// no-Node requirement is structural (the probe is a Rust bin target).
 #[tokio::test]
 async fn probe_builds_and_runs_over_stdio_without_node() {
