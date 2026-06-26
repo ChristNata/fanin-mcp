@@ -103,21 +103,30 @@ impl ServerHandler for Aggregator {
     ///
     /// Returns `Ok(CallToolResult::error(...))` — a tool-level result with
     /// `isError: true`, never a JSON-RPC error (D-005, GOTCHA #3).
+    ///
+    /// For `invoke_tool` we use the `RequestContext`'s `ct: CancellationToken`
+    /// (provided by rmcp =1.8.0) to abort the local in-flight upstream call
+    /// when the downstream client sends `notifications/cancelled`.
+    /// We do NOT forward a `notify_cancelled` upstream (see OQ3 structural finding).
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        Ok(self.dispatch_tool(request).await)
+        Ok(self.dispatch_tool(request, context).await)
     }
 }
 
 impl Aggregator {
-    async fn dispatch_tool(&self, request: CallToolRequestParams) -> CallToolResult {
+    async fn dispatch_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
         match request.name.as_ref() {
             "list_tools" => self.handle_list_tools(request.arguments).await,
             "get_tool_schema" => self.handle_get_tool_schema(request.arguments).await,
-            "invoke_tool" => self.handle_invoke_tool(request.arguments).await,
+            "invoke_tool" => self.handle_invoke_tool(request.arguments, context).await,
             other => not_implemented_result(other.to_string()),
         }
     }
@@ -249,7 +258,11 @@ impl Aggregator {
         )])
     }
 
-    async fn handle_invoke_tool(&self, arguments: Option<JsonObject>) -> CallToolResult {
+    async fn handle_invoke_tool(
+        &self,
+        arguments: Option<JsonObject>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
         let Some(args) = arguments else {
             return ToolError::InvalidRequest {
                 tool: "invoke_tool".to_string(),
@@ -313,9 +326,30 @@ impl Aggregator {
             }
             .as_result();
         };
-        match registry.call_tool(server, tool, Some(raw_arguments)).await {
-            Ok(result) => result,
-            Err(e) => e.as_result(),
+
+        // Race the upstream call against the downstream cancellation token.
+        // `ct` is cancelled by rmcp when a `notifications/cancelled` arrives
+        // for this request id. Dropping the call future aborts the local
+        // await (including the timeout wrapper inside registry) without
+        // waiting the full upstream duration.
+        //
+        // Per OQ3 (rmcp =1.8.0): we do NOT attempt to forward
+        // `notify_cancelled` upstream because the typed `peer().call_tool`
+        // future does not expose the upstream request id we would need.
+        // The observable is the local abort only.
+        let call_fut = registry.call_tool(server, tool, Some(raw_arguments));
+        tokio::select! {
+            res = call_fut => match res {
+                Ok(result) => result,
+                Err(e) => e.as_result(),
+            },
+            _ = context.ct.cancelled() => {
+                ToolError::CallCancelled {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                }
+                .as_result()
+            }
         }
     }
 }

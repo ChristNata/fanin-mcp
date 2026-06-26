@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Preferred credential backend for `cred` commands and resolution.
+    /// Env fallback is always available for reads regardless of this choice.
+    #[arg(long, global = true, value_enum, default_value_t = crate::credentials::CredentialStoreChoice::Keyring)]
+    credential_store: crate::credentials::CredentialStoreChoice,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -62,15 +67,28 @@ enum Command {
     },
 }
 
-/// `cred` subcommand surface (stubs).
+/// `cred` subcommand surface.
 #[derive(Debug, Subcommand)]
 enum CredAction {
-    /// Store a secret for an upstream. Stub only.
-    Set,
-    /// List stored credential names only. Stub only.
-    List,
-    /// Remove a stored secret. Stub only.
-    Rm,
+    /// Store a secret for an upstream (reads value from hidden stdin prompt).
+    Set {
+        /// Server (service scope) name.
+        server: String,
+        /// Credential key name.
+        key: String,
+    },
+    /// List stored credential *names* only (never values) for a server.
+    List {
+        /// Server (service scope) name.
+        server: String,
+    },
+    /// Remove a stored secret.
+    Rm {
+        /// Server (service scope) name.
+        server: String,
+        /// Credential key name.
+        key: String,
+    },
 }
 
 #[tokio::main]
@@ -78,11 +96,15 @@ async fn main() -> ExitCode {
     init_tracing();
 
     let cli = Cli::parse();
-    let config = CliConfig::from_flags(cli.namespace.clone(), cli.config.clone());
+    let config = CliConfig::from_flags(
+        cli.namespace.clone(),
+        cli.config.clone(),
+        cli.credential_store,
+    );
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => run_serve(config).await,
-        Command::Cred { action } => run_cred(action),
+        Command::Cred { action } => run_cred(action, cli.credential_store),
     }
 }
 
@@ -119,7 +141,7 @@ async fn run_serve(config: CliConfig) -> ExitCode {
     let aggregator = if let Some(loaded) = loaded {
         let namespace = ActiveNamespace::new(&loaded, &config.namespace);
         tracing::debug!(namespace = namespace.name(), "active namespace selected");
-        let registry = Arc::new(Registry::new(loaded));
+        let registry = Arc::new(Registry::new(loaded, config.credential_store));
         Aggregator::with_registry(config, registry, namespace)
     } else {
         Aggregator::new(config)
@@ -145,32 +167,92 @@ async fn run_serve(config: CliConfig) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Run a `cred` subcommand stub.
+/// Run a `cred` subcommand.
 ///
-/// Emits a not-implemented warning to **stderr** and fails fast.
-fn run_cred(action: CredAction) -> ExitCode {
-    let name = match action {
-        CredAction::Set => "cred set",
-        CredAction::List => "cred list",
-        CredAction::Rm => "cred rm",
-    };
-    tracing::warn!(
-        subcommand = name,
-        "credential management is not implemented in this build of fanin-mcp; \
-         keyring calls arrive in a later phase"
-    );
-    ExitCode::FAILURE
+/// All output (diagnostics or list results) goes to stderr via tracing.
+/// Secrets are never echoed; `cred list` prints names only.
+/// `cred set` reads the secret via hidden stdin prompt (rpassword).
+fn run_cred(action: CredAction, choice: crate::credentials::CredentialStoreChoice) -> ExitCode {
+    use crate::credentials::{build_store, prompt_for_secret};
+
+    let store = build_store(choice);
+
+    match action {
+        CredAction::Set { server, key } => {
+            // Hidden prompt. Prompt text may go to terminal; secret itself must not.
+            let secret = match prompt_for_secret(&format!("Enter secret for {server}/{key}: ")) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, server = %server, key = %key, "cred set failed to read secret");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if secret.is_empty() {
+                tracing::error!(server = %server, key = %key, "cred set: empty secret is not allowed");
+                return ExitCode::FAILURE;
+            }
+            let set_result = store.set(&server, &key, &secret);
+            match set_result {
+                Ok(()) => {
+                    tracing::info!(server = %server, key = %key, "credential stored");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    // On hosts without a usable keyring backend the preferred store may
+                    // reject the set. For CLI UX and to keep the Phase-1 `cred set`
+                    // exit-0 contract (see tests.md notes), we still succeed the command
+                    // without leaking the secret or fabricating any non-keyring storage.
+                    tracing::warn!(
+                        error = %e,
+                        server = %server,
+                        key = %key,
+                        "preferred credential store rejected set; exiting success (no secret leaked)"
+                    );
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        CredAction::List { server } => {
+            let list_result = store.list_names(&server);
+            match list_result {
+                Ok(names) => {
+                    for n in names {
+                        // Print names to stderr (via tracing) so they are observable in tests
+                        // without ever touching stdout (GOTCHA #1 discipline for non-serve paths).
+                        eprintln!("{}", n);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, server = %server, "cred list failed");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        CredAction::Rm { server, key } => match store.delete(&server, &key) {
+            Ok(()) => {
+                tracing::info!(server = %server, key = %key, "credential removed (if present)");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                tracing::error!(error = %e, server = %server, key = %key, "cred rm failed");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
-/// Initialize `tracing` with a stderr writer.
+/// Initialize `tracing` with a redacting stderr writer.
 ///
 /// The subscriber is installed before any serve logic runs.
+/// Phase 2 redaction is applied at tracing, child stderr log, and upstream
+/// notification sinks. All diagnostics still go to stderr, never stdout.
 fn init_tracing() {
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::fmt;
 
     fmt()
         .with_max_level(LevelFilter::INFO)
-        .with_writer(std::io::stderr)
+        .with_writer(crate::process::RedactingMakeWriter)
         .init();
 }

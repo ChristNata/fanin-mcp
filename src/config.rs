@@ -14,8 +14,9 @@
 //! transport = "stdio"          # optional; defaults to "stdio" in Phase 1
 //! command = '<path>'           # required for stdio
 //! args = []                    # optional; default empty
+//! timeout_secs = 60            # optional; default 60 (Phase 2 parses, Phase 3 wraps)
 //! log_file = '<path>'          # optional
-//! [servers.<name>.env]         # optional; literal KEY = 'value' (NO ${VAR})
+//! [servers.<name>.env]         # optional; values may contain ${VAR} (interpolated at spawn)
 //!
 //! [namespaces.<name>]
 //! servers = ["<name>"]         # the servers visible in this namespace
@@ -29,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::credentials::CredentialStoreChoice;
 use crate::error::StartupError;
 
 /// The selected namespace name when `--namespace` is omitted.
@@ -48,14 +50,22 @@ pub struct CliConfig {
     pub namespace: String,
     /// The path to the server config file (`--config`).
     pub config_path: Option<PathBuf>,
+    /// Preferred credential backend for `${VAR}` resolution (Phase 2+).
+    /// Env fallback is always tried after the preferred backend.
+    pub credential_store: CredentialStoreChoice,
 }
 
 impl CliConfig {
     /// Build a [`CliConfig`] from the parsed global flags.
-    pub fn from_flags(namespace: Option<String>, config_path: Option<PathBuf>) -> Self {
+    pub fn from_flags(
+        namespace: Option<String>,
+        config_path: Option<PathBuf>,
+        credential_store: CredentialStoreChoice,
+    ) -> Self {
         Self {
             namespace: namespace.unwrap_or_default(),
             config_path,
+            credential_store,
         }
     }
 }
@@ -91,14 +101,24 @@ pub struct ServerConfig {
     /// Spawn args. Optional; defaults to an empty vector.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Literal env vars (`[servers.<name>.env]`). Optional. Phase 1 does NOT
-    /// resolve `${VAR}` placeholders — values are stored verbatim for the
-    /// later forward path. No secret ever enters this map in Phase 1.
+    /// Per-server env vars (`[servers.<name>.env]`). Optional.
+    /// Values may contain `${VAR}` placeholders; these are resolved at spawn
+    /// time (preferred credential store → process env fallback → structured error).
+    /// Literal (non-secret) values pass through unchanged.
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Optional per-server log sink for child stderr + upstream log
     /// notifications (Phase 2+ asserts against it).
     pub log_file: Option<String>,
+    /// Per-server upstream call timeout in seconds. Optional; defaults to 60.
+    /// Parsing + default lands in Phase 2; the actual timeout wrapping is Phase 3.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+/// Default for `timeout_secs` (60 seconds).
+fn default_timeout_secs() -> u64 {
+    60
 }
 
 /// A single namespace (`[namespaces.<name>]`).

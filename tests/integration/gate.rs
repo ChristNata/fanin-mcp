@@ -274,19 +274,21 @@ async fn full_phase1_path_config_to_reverse_traffic_passes() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// P6.SC5: no Phase 2/3/4/5 functionality is accidentally introduced. This
-/// is a structural assertion best enforced by review, but one observable
-/// proxy is: the aggregator does not accept a `--credential-store` flag
-/// (Phase 3) or a `--passthrough-stderr` flag (Phase 5) — passing them must
-/// not change Phase 1 behavior. We assert the canonical config + namespace
-/// path is unaffected by unknown extra args (clap rejects unknown flags,
-/// which is correct — the point is the IMPLEMENTER did not wire Phase 3/5
-/// features).
+/// P6.SC5: the Phase 3 `--credential-store` global flag is ACCEPTED — it
+/// does not cause a clap rejection, and selects the preferred backend. The
+/// earlier Phase-1 "no scope creep" guard (which asserted the flag was an
+/// unknown rejection) is now invalid: Phase 3 legitimately adds
+/// `--credential-store keyring|env` as a global flag (see `src/main.rs` and
+/// `src/credentials.rs::CredentialStoreChoice`).
 ///
-/// This is a light gate; the heavy "no scope creep" enforcement is review's
-/// job, not a unit test's. Recorded as a boundary in `tests.md`.
+/// The observable: passing `--credential-store keyring` alongside a valid
+/// `--config` lets the server start and answer `initialize` with a valid
+/// `serverInfo` — i.e. clap parsed the flag and the server began serving,
+/// rather than exiting non-zero on a parse error. The test does NOT assert
+/// on any secret value (D-010); it only asserts the flag is structurally
+/// accepted. Recorded as a boundary in `tests.md`.
 #[tokio::test]
-async fn phase1_does_not_accept_phase3_credential_store_flag() {
+async fn credential_store_flag_is_accepted() {
     let cfg = fx::ConfigBuilder::new().write();
     let args = vec![
         "--config".to_string(),
@@ -296,20 +298,21 @@ async fn phase1_does_not_accept_phase3_credential_store_flag() {
     ];
     let mut child = common::spawn_fanin_with_args(&args).await;
 
-    // clap should reject the unknown flag and exit non-zero before serving.
-    // (If the implementer wired --credential-store in Phase 1, that is scope
-    // creep — this test fails by succeeding to initialize.)
-    let stdout = child.drain_stdout_raw(Duration::from_secs(5)).await;
+    // clap accepted the flag => the server started serving. A clap rejection
+    // would have exited non-zero BEFORE serving, so `initialize` would hang
+    // (no response) and the gate's deadline would fail the test. We assert
+    // the positive: initialize returns a well-formed result with serverInfo.
+    let init = timeout(Duration::from_secs(10), common::initialize(&mut child))
+        .await
+        .expect(
+            "credential_store_flag_is_accepted: --credential-store keyring must be accepted \
+             (server starts serving); clap rejection would have exited before serving",
+        );
     assert!(
-        stdout.is_empty(),
-        "an unknown --credential-store flag must not start serving (Phase 3 \
-         scope creep); got stdout bytes: {:?}",
-        String::from_utf8_lossy(&stdout)
+        init.get("serverInfo").is_some(),
+        "credential_store_flag_is_accepted: initialize result must carry serverInfo \
+         (--credential-store keyring accepted, server serving)"
     );
 
-    let status = child.into_guard().shutdown().await.ok().flatten();
-    assert!(
-        status.map(|s| !s.success()).unwrap_or(false),
-        "unknown --credential-store must exit non-zero (clap rejection); status: {status:?}"
-    );
+    child.into_guard().shutdown().await.ok();
 }

@@ -46,6 +46,21 @@ pub enum ToolError {
         tool: String,
         message: String,
     },
+    /// Upstream call exceeded the per-server `timeout_secs`.
+    /// Returned as `CallToolResult { isError: true }` with code "upstream_timeout".
+    /// Never a JSON-RPC error (D-005).
+    UpstreamTimeout { server: String, tool: String },
+    /// Downstream client sent `notifications/cancelled` for this request id.
+    /// We abort the local in-flight future (local observable per OQ3).
+    /// We do not forward `notify_cancelled` upstream (rmcp=1.8.0 does not give
+    /// the upstream request id for a typed `peer().call_tool`).
+    CallCancelled { server: String, tool: String },
+    /// A `${VAR}` reference in a server's env (or headers) could not be resolved.
+    /// Produced at spawn time when preferred backend + env fallback both lack the key.
+    /// Rendered as a structured tool error (never a JSON-RPC error).
+    /// Allowed dead_code in Phase 1; wired by Phase 2 interpolation.
+    #[allow(dead_code)]
+    CredentialResolution { server: String, key: String },
 }
 
 impl ToolError {
@@ -94,6 +109,27 @@ impl ToolError {
                 Some(tool),
                 "upstream_call_failed",
                 message,
+                true,
+            ),
+            ToolError::UpstreamTimeout { server, tool } => structured_error(
+                Some(server),
+                Some(tool),
+                "upstream_timeout",
+                &format!("upstream call to `{tool}` on `{server}` exceeded timeout"),
+                true,
+            ),
+            ToolError::CallCancelled { server, tool } => structured_error(
+                Some(server),
+                Some(tool),
+                "call_cancelled",
+                &format!("call to `{tool}` on `{server}` was cancelled by client"),
+                true,
+            ),
+            ToolError::CredentialResolution { server, key } => structured_error(
+                Some(server),
+                None,
+                "credential_resolution_failed",
+                &format!("missing credential `{key}` for server `{server}`"),
                 true,
             ),
         }

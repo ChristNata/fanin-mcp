@@ -82,7 +82,9 @@ impl ClientHandler for UpstreamClientHandler {
         _context: NotificationContext<RoleClient>,
     ) {
         if let Some(path) = &self.log_file {
-            let line = format!("logging {:?}: {}", params.level, params.data);
+            let raw = format!("logging {:?}: {}", params.level, params.data);
+            // Redact before the line can hit the log file (sentinel-redaction contract).
+            let line = crate::process::redact(&raw);
             append_log_line(path.clone(), self.server.clone(), line).await;
         }
     }
@@ -93,7 +95,8 @@ impl ClientHandler for UpstreamClientHandler {
         _context: NotificationContext<RoleClient>,
     ) {
         if let Some(path) = &self.log_file {
-            let line = format!("progress {:?}", params);
+            let raw = format!("progress {:?}", params);
+            let line = crate::process::redact(&raw);
             append_log_line(path.clone(), self.server.clone(), line).await;
         }
     }

@@ -8,16 +8,29 @@
 //! - stderr capture intact after process wrapping: `[server]`-prefixed
 //!   redacted lines still reach the log file (SC 23).
 //!
-//! The hard-kill orphan test (SC 21) is the MANDATORY D-009 proof. It uses
-//! the probe's `spawn_grandchild` tool to start a long-lived descendant
-//! process that writes a presence marker; after force-killing fanin-mcp, the
-//! test asserts the marker is gone (the grandchild was killed by the
-//! containment layer). An uncontained tree leaves the grandchild alive and
-//! the marker persists — the failure the test catches.
+//! ## Oracle — grandchild PID liveness, NOT marker absence
+//!
+//! The hard-kill orphan test (SC 21) is the MANDATORY D-009 proof. The
+//! probe's `spawn_grandchild` tool writes a marker file whose CONTENT is the
+//! grandchild's PID, then sleeps for 30s and removes the marker only on a
+//! CLEAN exit. Containment works by Job Object `KILL_ON_JOB_CLOSE` on Windows
+//! / process-group kill on Unix — that is a hard `TerminateProcess` that
+//! kills the grandchild WITHOUT running its cleanup, so the marker PERSISTS
+//! even though the process is dead. On a force-kill of fanin-mcp, Rust `Drop`
+//! never runs either; only the kernel job-close kills the tree — correctly.
+//!
+//! Net: marker-absence cannot distinguish "contained/killed" from "survived."
+//! Both leave the marker at the test's check time. So the oracle is the
+//! grandchild PROCESS LIVENESS, not the marker's absence:
+//!
+//! 1. Before teardown, capture the grandchild PID from the marker content.
+//! 2. After teardown + the cleanup interval, assert that PID is NOT alive.
+//!
+//! The marker file may remain as the PID-communication channel; the test's
+//! own cleanup removes it on drop so temp files do not accumulate.
 //!
 //! All tests are wire-level. The suite compiles clean against the current
-//! tree (no Job Object / process group in `process.rs`) and fails RED on
-//! the absent containment, not on missing symbols.
+//! tree and asserts the dead-process observable, not the marker file.
 
 use std::time::Duration;
 
@@ -30,15 +43,16 @@ use crate::common::fixtures as fx;
 /// Deadline for a meta-tool call that may trigger a lazy spawn.
 const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 
-/// How long to wait after force-killing fanin-mcp before checking the
-/// grandchild marker. The containment layer (Job Object kill-on-close /
-// process group kill) is observed synchronously on the kill, but the OS
-// reaping + the grandchild's own shutdown (marker removal on clean exit)
-// may take a moment. The grandchild lifetime (30s) is far longer than this
-/// interval, so a surviving grandchild keeps the marker; a contained
-/// grandchild is killed before the lifetime elapses, so the marker is
-/// removed (or never written).
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(2);
+/// How long to poll for the grandchild's death after force-killing
+/// fanin-mcp. The containment layer (Job Object kill-on-close / process
+/// group kill) kills the grandchild when the tree is torn down; the OS
+/// reaping is asynchronous, so the tests poll within this window rather
+/// than checking once. The grandchild lifetime (30s) far exceeds this
+/// window, so a SURVIVING grandchild (containment failed) is still alive
+/// at the end — the poll does not mask a real failure: a working
+/// containment lands in well under a second (the stdin-EOF path kills in
+/// ~400ms); a failed containment stays alive past 30s.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Extract the joined text of a CallToolResult's content array.
 fn result_text(result: &Value) -> String {
@@ -59,29 +73,136 @@ fn result_text(result: &Value) -> String {
         .join("")
 }
 
+/// Test whether a process with the given PID is currently alive.
+///
+/// Cross-platform, shell-out only (no `libc` / `windows-sys` test dep):
+/// - Unix: `kill -0 <pid>` — the zero-signal probe. Exit 0 means the process
+///   exists; non-zero means no such process (or we lack permission, which on
+///   a test-owned grandchild does not arise). This mirrors the existing
+///   `kill_process_by_id` pattern in `common/mod.rs`.
+/// - Windows: `tasklist /FI "PID eq <pid>" /NH /FO CSV` and inspect the output
+///   for the quoted PID. `tasklist` ships on every Windows edition.
+///
+/// Returns `true` if the process is alive, `false` if it is dead. A dead
+/// PID is the containment success observable; an alive PID means the tree
+/// survived the force-kill (containment failed).
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // `kill -0` is the standard liveness probe: exit 0 if the process
+        // exists (and we may signal it), non-zero otherwise. On a test-spawned
+        // grandchild owned by the same user, EPERM does not arise.
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        matches!(status, Ok(s) if s.success())
+    }
+    #[cfg(windows)]
+    {
+        // tasklist filters by PID; if the PID appears in the CSV output, the
+        // process is alive. tasklist ships on every Windows edition.
+        let output = match std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return false, // tasklist missing — treat as dead.
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // When no process matches, tasklist prints an informational line
+        // ("INFO: No tasks are running ...") that never quotes the PID. A
+        // live process row contains the quoted PID; match the quoted form
+        // to avoid a false positive against the INFO line.
+        stdout.contains(&format!("\"{pid}\""))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Parse the grandchild PID from the marker file content. The probe writes
+/// `std::process::id().to_string()` as the marker; a missing or non-numeric
+/// marker means the grandchild never started cleanly, which is a setup
+/// failure surfaced clearly to the implementer.
+fn parse_grandchild_pid(marker_path: &str) -> u32 {
+    let content = std::fs::read_to_string(marker_path).unwrap_or_else(|e| {
+        panic!(
+            "grandchild marker must be readable to extract the PID; \
+             path: {marker_path}, error: {e}"
+        )
+    });
+    let trimmed = content.trim();
+    trimmed.parse::<u32>().unwrap_or_else(|e| {
+        panic!(
+            "grandchild marker must contain the grandchild PID as a number; \
+             path: {marker_path}, content: {content:?}, parse error: {e}"
+        )
+    })
+}
+
+/// Poll for the grandchild process to die within a bounded window. The
+/// containment layer (Job Object kill-on-close / process group kill) kills
+/// the grandchild when fanin-mcp's process tree is torn down, but the OS
+/// reaping is asynchronous — a single check at a fixed interval can race
+/// the kill propagation. This polls up to `deadline` (wall-clock from the
+/// call) and returns `true` if the process dies within the window, `false`
+/// if it is still alive at the end (the containment failure the test
+/// catches).
+///
+/// The grandchild lifetime (30s) far exceeds the deadline, so a SURVIVING
+/// grandchild (containment failed) is still alive at the end of the window
+/// — the poll does not mask a real failure: a failed containment stays
+/// alive past 30s, well beyond any reasonable poll deadline.
+async fn wait_for_process_death(pid: u32, deadline: Duration) -> bool {
+    let start = std::time::Instant::now();
+    let poll = Duration::from_millis(200);
+    loop {
+        if !process_is_alive(pid) {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// Master SC 19 / SC 20 / SC 21: the mandatory hard-kill orphan test (D-009).
 ///
 /// The test:
 /// 1. Spawns `fanin-mcp` with a single configured upstream.
 /// 2. Invokes `spawn_grandchild` on the upstream, which starts a long-lived
-///    descendant process that writes a presence marker at a known path.
+///    descendant process that writes a marker file at a known path. The
+///    marker CONTENT is the grandchild's PID.
 /// 3. Force-kills `fanin-mcp` (kill the aggregator, not the probe — the
 ///    probe is a child of the aggregator).
 /// 4. Waits `CLEANUP_INTERVAL` for the OS to reap the tree.
-/// 5. Asserts the marker is GONE — the grandchild was killed by the
-///    containment layer (Job Object kill-on-close on Windows, process group
-///    kill on Unix). An uncontained tree leaves the grandchild alive and
-///    the marker persists — the failure the test catches.
+/// 5. Asserts the grandchild PROCESS is DEAD — captured by its PID from the
+///    marker, then checked for liveness. The containment layer (Job Object
+///    kill-on-close on Windows, process group kill on Unix) hard-terminates
+///    the grandchild WITHOUT running its cleanup, so the marker may persist
+///    even though the process is dead — the marker's absence is NOT the
+///    oracle, the PID's liveness is. An uncontained tree leaves the
+///    grandchild alive and the PID still resolves — the failure this catches.
 ///
 /// On Windows, this catches the `cmd /c npx` descendant shape (the
 /// grandchild is a detached child of the probe, which is a child of
 /// fanin-mcp; the Job Object must kill the whole tree). On Unix, the
 /// process group kill must reach the grandchild.
 ///
-/// The current tree has no containment (`process.rs` spawns a bare
-/// `TokioChildProcess`), so the grandchild survives and the marker persists
-/// — RED until the implementer installs Job Object / process group
-/// containment.
+/// The oracle polls the grandchild PID for death within a bounded window
+/// (5s, far shorter than the 30s grandchild lifetime). A working
+/// containment kills the grandchild in well under a second (the stdin-EOF
+/// path kills in ~400ms); a failed containment leaves the orphan alive
+/// past 30s, so the 5s window cleanly distinguishes the two.
 #[tokio::test]
 async fn hard_kill_orphan_test_no_surviving_descendants() {
     let server = format!("srv-{}", fx::phase3_unique_seq());
@@ -95,7 +216,8 @@ async fn hard_kill_orphan_test_no_surviving_descendants() {
     common::initialize(&mut child).await;
 
     // Trigger the lazy spawn + grandchild. The probe's `spawn_grandchild`
-    // tool starts a long-lived descendant that writes the marker.
+    // tool starts a long-lived descendant that writes the marker (whose
+    // content is the grandchild's PID).
     let resp = timeout(
         SPAWN_DEADLINE,
         common::call_tool(
@@ -120,7 +242,11 @@ async fn hard_kill_orphan_test_no_surviving_descendants() {
         "spawn_grandchild must report the descendant started; got: {text:?}"
     );
 
-    // Confirm the marker was written (the grandchild is alive).
+    // Confirm the marker was written (the grandchild is alive) and capture
+    // the grandchild PID from the marker content. The marker is written by
+    // the grandchild before it sleeps; the "marker must be present before
+    // kill" setup check stays as the precondition that the grandchild
+    // actually started.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let marker_before = std::fs::read_to_string(&marker_path).unwrap_or_default();
     assert!(
@@ -128,27 +254,35 @@ async fn hard_kill_orphan_test_no_surviving_descendants() {
         "grandchild marker must be present before fanin-mcp is killed; \
          path: {marker_path}"
     );
+    let grandchild_pid = parse_grandchild_pid(&marker_path);
 
     // Force-kill fanin-mcp. Take the underlying tokio Child so we can kill
     // it directly without the clean-EOF shutdown path.
     let guard = child.into_guard();
     guard.kill_and_wait().await;
 
-    // Wait for the OS to reap the tree. The grandchild lifetime (30s) is
-    // far longer than this interval, so a surviving grandchild keeps the
-    // marker; a contained grandchild is killed before the lifetime elapses.
-    tokio::time::sleep(CLEANUP_INTERVAL).await;
-
-    // SC 21: zero surviving upstream descendants. The marker must be GONE.
-    let marker_after = std::fs::read_to_string(&marker_path).unwrap_or_default();
+    // SC 21: zero surviving upstream descendants. The oracle is the
+    // grandchild PROCESS LIVENESS — the marker may persist (the hard kill
+    // does not run the grandchild's cleanup), but a contained tree leaves
+    // the PID dead. The OS reaping is asynchronous, so we poll for the
+    // grandchild's death within a bounded window (CLEANUP_INTERVAL) rather
+    // than checking once. The grandchild lifetime (30s) far exceeds the
+    // window, so a SURVIVING grandchild (containment failed) is still alive
+    // at the end — the poll does not mask a real failure. An uncontained
+    // tree leaves the orphan alive and the PID still resolves — the
+    // failure this catches.
     assert!(
-        marker_after.is_empty(),
+        wait_for_process_death(grandchild_pid, CLEANUP_INTERVAL).await,
         "hard-kill orphan test (SC 21 / D-009): after force-killing fanin-mcp, the \
-         grandchild marker must be GONE (containment killed the descendant); \
-         marker still present at {marker_path} with content:\n{marker_after}"
+         grandchild (pid {grandchild_pid}) must be DEAD within {CLEANUP_INTERVAL:?} \
+         (containment killed the descendant); it is still alive. The marker may \
+         persist (hard kill does not run cleanup) — the dead PROCESS is the oracle, \
+         not the marker file. marker at {marker_path}"
     );
 
-    // Clean up any stale marker.
+    // Clean up the stale marker. The marker file may remain (hard kill does
+    // not remove it); the test owns its temp-file cleanup so files do not
+    // accumulate across runs.
     let _ = std::fs::remove_file(&marker_path);
 }
 
@@ -156,9 +290,12 @@ async fn hard_kill_orphan_test_no_surviving_descendants() {
 /// tree. A clean shutdown (close stdin => EOF => fanin-mcp exits) must kill
 /// the spawned upstream AND any descendants, not just the aggregator.
 ///
-/// The observable: after a clean shutdown, the grandchild marker is gone.
-/// The grandchild lifetime (30s) is far longer than the cleanup interval, so
-/// a surviving grandchild keeps the marker; a contained tree removes it.
+/// The observable: after a clean shutdown, the grandchild PROCESS is dead.
+/// The grandchild's PID is captured from the marker (written before the
+/// teardown); a contained tree kills the grandchild before its 30s lifetime
+/// elapses, so the PID is dead at the check. The marker may persist (the
+/// kill does not run the grandchild's cleanup) — the dead PROCESS is the
+/// oracle, not the marker file.
 #[tokio::test]
 async fn stdin_eof_teardown_terminates_full_upstream_tree() {
     let server = format!("srv-{}", fx::phase3_unique_seq());
@@ -187,27 +324,32 @@ async fn stdin_eof_teardown_terminates_full_upstream_tree() {
     .expect("spawn_grandchild must complete within deadline");
     common::assert_no_rpc_error(&resp, "spawn_grandchild (eof teardown)");
 
-    // Confirm the marker is present.
+    // Confirm the marker is present and capture the grandchild PID.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let marker_before = std::fs::read_to_string(&marker_path).unwrap_or_default();
     assert!(
         !marker_before.is_empty(),
         "grandchild marker must be present before EOF teardown; path: {marker_path}"
     );
+    let grandchild_pid = parse_grandchild_pid(&marker_path);
 
     // Clean shutdown: close stdin (EOF) and wait for fanin-mcp to exit.
     child.into_guard().shutdown().await.ok();
 
-    // Wait for the tree to be reaped.
-    tokio::time::sleep(CLEANUP_INTERVAL).await;
-
-    // SC 22: the full upstream tree must be terminated. The marker must be
-    // gone.
-    let marker_after = std::fs::read_to_string(&marker_path).unwrap_or_default();
+    // SC 22: the full upstream tree must be terminated. The grandchild
+    // PROCESS must be dead. The marker may persist (the kill does not run
+    // the grandchild's cleanup); the dead PID is the oracle, not the
+    // marker file. The OS reaping is asynchronous, so we poll for the
+    // grandchild's death within a bounded window (CLEANUP_INTERVAL). A
+    // teardown that killed only the aggregator (not the tree) would leave
+    // the grandchild alive past the window — the failure this catches.
     assert!(
-        marker_after.is_empty(),
-        "stdin-EOF teardown (SC 22): the grandchild marker must be GONE after a clean \
-         shutdown; marker still present at {marker_path} with content:\n{marker_after}"
+        wait_for_process_death(grandchild_pid, CLEANUP_INTERVAL).await,
+        "stdin-EOF teardown (SC 22): the grandchild (pid {grandchild_pid}) must be \
+         DEAD within {CLEANUP_INTERVAL:?} after a clean shutdown; it is still alive. \
+         A teardown that killed only the aggregator (not the tree) would leave the \
+         grandchild alive. The marker may persist (kill does not run cleanup) — \
+         the dead PROCESS is the oracle. marker at {marker_path}"
     );
 
     let _ = std::fs::remove_file(&marker_path);

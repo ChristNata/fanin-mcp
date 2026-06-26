@@ -205,20 +205,31 @@ so a stub that returns the right shape without doing the work fails.
   the beta echo completes within 400ms — strictly shorter than the 1s
   timeout. A registry lock held across the timeout await would serialize the
   session; the beta echo would block until alpha's timeout fired (>= 1s).
-- **Hard-kill orphan is a side-effect assertion on the process tree.**
-  `hard_kill_orphan_test_no_surviving_descendants` spawns a grandchild via
-  the probe, force-kills fanin-mcp, waits a cleanup interval, and asserts
-  the grandchild's presence marker is GONE. The grandchild's lifetime (30s)
-  far exceeds the cleanup interval (2s), so a surviving grandchild keeps
-  the marker; a contained tree (Job Object / process group) kills the
-  grandchild before the lifetime elapses, so the marker is removed. An
-  uncontained tree leaves the orphan alive and the marker persists — the
-  failure the test catches. This is the MANDATORY D-009 proof.
-- **Stdin-EOF teardown is a side-effect assertion on the full tree.**
+- **Hard-kill orphan is a side-effect assertion on the process LIVENESS,
+  not the marker file.** `hard_kill_orphan_test_no_surviving_descendants`
+  spawns a grandchild via the probe (the probe writes the grandchild's PID
+  as the marker content), force-kills fanin-mcp, waits a cleanup interval,
+  and asserts the grandchild PROCESS is DEAD by probing its PID. The
+  marker file may PERSIST — Job Object `KILL_ON_JOB_CLOSE` / process-group
+  kill is a hard `TerminateProcess` that kills the grandchild WITHOUT
+  running its cleanup (the grandchild removes the marker only on a clean
+  exit after its 30s sleep; a force-kill of fanin-mcp also skips Rust
+  `Drop`). So marker-absence cannot distinguish "contained/killed" from
+  "survived" — both leave the marker. The dead PROCESS is the oracle: a
+  contained tree leaves the PID dead at the check; an uncontained tree
+  leaves the orphan alive and the PID still resolves — the failure the
+  test catches. Cross-platform liveness probe: `kill -0 <pid>` on Unix,
+  `tasklist /FI "PID eq <pid>"` on Windows (no `libc`/`windows-sys` test
+  dep — shell-out only). This is the MANDATORY D-009 proof.
+- **Stdin-EOF teardown is a side-effect assertion on the full tree's
+  LIVENESS, not the marker file.**
   `stdin_eof_teardown_terminates_full_upstream_tree` spawns a grandchild,
-  closes stdin (EOF => fanin-mcp exits), waits, and asserts the marker is
-  gone. A teardown that killed only the aggregator (not the tree) would
-  leave the grandchild alive and the marker present.
+  captures its PID from the marker, closes stdin (EOF => fanin-mcp exits),
+  waits, and asserts the grandchild PROCESS is DEAD by probing its PID. A
+  teardown that killed only the aggregator (not the tree) would leave the
+  grandchild alive and the PID still resolving. The marker may persist
+  (kill does not run cleanup); the dead PID is the oracle, mirroring the
+  hard-kill test.
 - **Stderr capture intact is a side-effect assertion on the log file.**
   `stderr_capture_intact_after_process_wrapping` invokes a tool that makes
   the probe write to its stderr, then reads the log file and asserts at
@@ -285,11 +296,13 @@ the reason and the proxy/boundary that does cover them:
   keyring-specific round-trip test is `#[ignore]`-gated; the env-fallback
   `cred set` path is the always-run proof.
 - **Grandchild marker race.** The hard-kill test waits 200ms after
-  `spawn_grandchild` for the grandchild to write the marker before
-  force-killing fanin-mcp. A slower host might need a longer window; the
-  200ms is tuned for CI. If the marker is not present before the kill, the
-  test fails with a clear "marker must be present before fanin-mcp is
-  killed" message — a setup failure, not a containment failure.
+  `spawn_grandchild` for the grandchild to write the marker (whose content
+  is the grandchild PID) before force-killing fanin-mcp. A slower host
+  might need a longer window; the 200ms is tuned for CI. If the marker is
+  not present before the kill, the test fails with a clear "marker must be
+  present before fanin-mcp is killed" message — a setup failure, not a
+  containment failure. The PID is parsed from the marker content; the
+  liveness probe (`kill -0` / `tasklist`) is the containment oracle.
 
 ## Run-and-fail confirmation
 
@@ -326,9 +339,12 @@ landed, Phase 3 NOT yet built):
       wrapping; the slow alpha call returns success instead of
       `upstream_timeout`.
     - `hard_kill_orphan_test_no_surviving_descendants` — no containment;
-      the grandchild survives fanin-mcp's force-kill and keeps its marker.
+      the grandchild survives fanin-mcp's force-kill and its PID is still
+      alive at the check (the marker may persist, but the PID liveness is
+      the oracle).
     - `stdin_eof_teardown_terminates_full_upstream_tree` — no containment;
-      the grandchild survives the clean shutdown.
+      the grandchild survives the clean shutdown and its PID is still
+      alive (the marker may persist, but the PID liveness is the oracle).
   - The 8 Phase 3 tests that PASS are: `cred_list_emits_names_only_never_values`
     (value-absence holds against any stub output), `env_fallback_resolves_without_keyring`
     (no-echo holds), `sentinel_secret_redacted_from_tracing_stderr_and_upstream_logs`
@@ -353,6 +369,56 @@ landed, Phase 3 NOT yet built):
   logic in `src/credentials.rs`, `src/config.rs`, `src/registry.rs`,
   `src/process.rs`, and `src/main.rs`.
 
+### Oracle correction (post-implementation)
+
+The original `process_lifetime` oracle (marker-absence) was incorrect:
+Job Object `KILL_ON_JOB_CLOSE` / process-group kill hard-terminates the
+grandchild WITHOUT running its cleanup, so the marker PERSISTS even though
+the process is dead. The oracle was corrected to grandchild-PID LIVENESS:
+the marker's CONTENT is the grandchild PID (the probe writes
+`std::process::id().to_string()`); the test captures that PID before
+teardown and polls for the PID's death within a bounded window
+(`CLEANUP_INTERVAL`, 5s — far shorter than the 30s grandchild lifetime).
+The marker may remain as the PID-communication channel; the test owns its
+temp-file cleanup.
+
+**Evidence on the current tree (Windows host):**
+
+- `stdin_eof_teardown_terminates_full_upstream_tree` (SC 22): the grandchild
+  dies in ~400ms after stdin-EOF. Clean shutdown runs Rust `Drop`, which
+  fires `process_wrap`'s `KillOnDrop`, killing the job members. Containment
+  works on this path. **PASS** when run in isolation.
+- `hard_kill_orphan_test_no_surviving_descendants` (SC 21): the grandchild
+  is STILL ALIVE 5s after `guard.kill_and_wait()`. A force-kill of fanin-mcp
+  skips Rust `Drop`, so `KillOnDrop` does not fire; the only kill mechanism
+  is `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` when the job HANDLE closes. The
+  grandchild lives its full 30s natural lifetime and exits cleanly (which
+  removes the marker — the original broken oracle would have called this
+  "contained"). The detached `probe-server.exe` grandchild IS confirmed
+  alive at PID-from-marker cross-check (`tasklist` lists it). **FAIL — this
+  is a production containment defect, not a test oracle error.**
+
+The likely root cause (for the implementer, not the test): the probe (the
+direct child in the job) inherits a clone of the Job Object handle, so the
+job does not close when fanin-mcp is hard-killed — it stays open until the
+probe (and its grandchild) die on their own. `KILL_ON_JOB_CLOSE` only fires
+when the LAST handle to the job closes. The fix is in `src/process.rs`:
+ensure the Job Object handle is non-inheritable (or use a dedicated
+non-inherited handle) so the child does not hold the job open. This is
+exactly the classic Windows Job Object pitfall D-009 / GOTCHA #11/#14 warn
+against.
+
+- **`cargo test --test integration` (current tree, Windows): 82 passed /
+  2 failed / 3 ignored** when run in parallel (the stdin-EOF test flakes
+  under parallel load at the 5s window; in isolation it passes at ~400ms).
+  The 2 failures are both `process_lifetime` — the hard-kill path is a
+  real defect; the stdin-EOF path works in isolation.
+- `gate.rs::credential_store_flag_is_accepted` (renamed from
+  `phase1_does_not_accept_phase3_credential_store_flag`) passes for the
+  right reason: `--credential-store keyring` is an ACCEPTED global flag
+  (clap does not reject it; the server starts and answers `initialize`),
+  not the stale "unknown flag rejected" premise.
+
 ## Per-module inventory
 
 | Module | Tests |
@@ -376,12 +442,17 @@ tools and a grandchild-mode branch, all owned by `test-creator`:
   key is reported honestly.
 - **`spawn_grandchild`** — spawns a long-lived descendant process (re-exec
   of the probe binary in grandchild mode) that writes a presence marker at
-  `marker_path` and sleeps for 30s. Used by the hard-kill orphan proof
-  (SC 21) and the stdin-EOF teardown proof (SC 22). The grandchild is
+  `marker_path` whose CONTENT is the grandchild's PID, then sleeps for 30s
+  and removes the marker only on a CLEAN exit. Used by the hard-kill orphan
+  proof (SC 21) and the stdin-EOF teardown proof (SC 22). The grandchild is
   spawned with stdin/stdout/stderr null so it never touches the probe's MCP
   stdio stream (GOTCHA #1). On Windows it is detached
   (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`) so it can survive a plain
-  kill of the probe — the containment layer must catch it instead.
+  kill of the probe — the containment layer must catch it instead. The
+  test oracle is the grandchild PID LIVENESS (parsed from the marker), not
+  the marker's absence — Job Object / process-group kill hard-terminates
+  the grandchild without running its cleanup, so the marker persists even
+  when containment succeeds; the dead PID is the oracle.
 - **Grandchild sentinel branch** — `__grandchild__ <marker_path> <secs>`
   argv selects a branch of `main` that writes the marker, sleeps, and
   removes the marker on a clean exit. Runs BEFORE tracing/serve setup so it

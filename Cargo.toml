@@ -33,6 +33,20 @@ rmcp = { version = "=1.8.0", default-features = false, features = [
     "transport-child-process",
 ] }
 
+# process-wrap — provides JobObject (Windows) and ProcessSession/ProcessGroup (Unix)
+# wrappers. rmcp 1.8.0's TokioChildProcess::builder accepts CommandWrap natively
+# (via the `transport-child-process` feature). We enable the tokio frontend and
+# the containment wrappers so that hard-kill of fanin-mcp (taskkill /F, etc.)
+# tears down the entire upstream tree with zero orphans (D-009).
+process-wrap = { version = "9", default-features = false, features = [
+    "tokio1",
+    "job-object",
+    "kill-on-drop",
+    "creation-flags",
+    "process-group",
+    "process-session",
+] }
+
 # Tokio full — the async runtime. Later phases exercise process spawning,
 # io, sync, time; `full` keeps the feature set stable across phases so
 # Cargo.toml is not churned by P0.2/P0.3.
@@ -51,6 +65,26 @@ tracing-subscriber = "0.3"
 # a direct build-time input for tool input-schema generation in P0.2, so it
 # is declared explicitly here.
 schemars = "0.8"
+
+# Credential storage (OS keychain) and hidden prompt for `cred set`.
+# keyring v3 ships no backend unless a platform feature is enabled.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+rpassword = "7"
+
+[target.'cfg(windows)'.dependencies]
+# windows — direct Win32 Job Object calls for hard-kill process-tree
+# containment. process-wrap's rmcp integration spawns correctly, but the job
+# handle must be held explicitly by fanin-mcp so kernel KILL_ON_JOB_CLOSE is
+# the hard-kill carrier.
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # Explicit dev-deps so the integration test binary is self-contained per
