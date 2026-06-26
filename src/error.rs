@@ -74,63 +74,51 @@ impl ToolError {
                 )
             }
             ToolError::InvalidRequest { tool, message } => {
-                structured_error(None, Some(tool), "invalid_request", message, true)
+                structured_error(None, Some(tool), "invalid_request", message)
             }
             ToolError::UnknownServer { server } => structured_error(
                 Some(server),
                 None,
                 "unknown_server",
                 "server is not configured or not visible in the active namespace",
-                true,
             ),
             ToolError::UnknownTool { server, tool } => structured_error(
                 Some(server),
                 Some(tool),
                 "unknown_tool",
                 &format!("unknown upstream tool `{tool}` on server `{server}`"),
-                true,
             ),
             ToolError::NamespaceDenied { server, tool } => structured_error(
                 Some(server),
                 tool.as_deref(),
                 "namespace_denied",
                 "server or tool is denied by the active namespace",
-                true,
             ),
             ToolError::UpstreamConnect { server, message } => {
-                structured_error(Some(server), None, "upstream_connect_failed", message, true)
+                structured_error(Some(server), None, "upstream_connect_failed", message)
             }
             ToolError::UpstreamCall {
                 server,
                 tool,
                 message,
-            } => structured_error(
-                Some(server),
-                Some(tool),
-                "upstream_call_failed",
-                message,
-                true,
-            ),
+            } => structured_error(Some(server), Some(tool), "upstream_call_failed", message),
             ToolError::UpstreamTimeout { server, tool } => structured_error(
                 Some(server),
                 Some(tool),
                 "upstream_timeout",
                 &format!("upstream call to `{tool}` on `{server}` exceeded timeout"),
-                true,
             ),
             ToolError::CallCancelled { server, tool } => structured_error(
                 Some(server),
                 Some(tool),
                 "call_cancelled",
                 &format!("call to `{tool}` on `{server}` was cancelled by client"),
-                true,
             ),
             ToolError::CredentialResolution { server, key } => structured_error(
                 Some(server),
                 None,
                 "credential_resolution_failed",
                 &format!("missing credential `{key}` for server `{server}`"),
-                true,
             ),
         }
     }
@@ -141,19 +129,13 @@ impl ToolError {
     }
 }
 
-fn structured_error(
-    server: Option<&str>,
-    tool: Option<&str>,
-    code: &str,
-    message: &str,
-    recoverable: bool,
-) -> String {
+fn structured_error(server: Option<&str>, tool: Option<&str>, code: &str, message: &str) -> String {
     json!({
         "server": server,
         "tool": tool,
         "code": code,
         "message": message,
-        "recoverable": recoverable,
+        "recoverable": true,
     })
     .to_string()
 }

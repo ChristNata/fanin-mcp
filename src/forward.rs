@@ -81,12 +81,8 @@ impl ClientHandler for UpstreamClientHandler {
         params: LoggingMessageNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) {
-        if let Some(path) = &self.log_file {
-            let raw = format!("logging {:?}: {}", params.level, params.data);
-            // Redact before the line can hit the log file (sentinel-redaction contract).
-            let line = crate::process::redact(&raw);
-            append_log_line(path.clone(), self.server.clone(), line).await;
-        }
+        let raw = format!("logging {:?}: {}", params.level, params.data);
+        self.append_redacted(raw).await;
     }
 
     async fn on_progress(
@@ -94,8 +90,16 @@ impl ClientHandler for UpstreamClientHandler {
         params: ProgressNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) {
+        let raw = format!("progress {:?}", params);
+        self.append_redacted(raw).await;
+    }
+}
+
+impl UpstreamClientHandler {
+    /// Redact then append to the per-server log file if one is configured.
+    /// Centralizes the redaction + append pattern used by log and progress handlers.
+    async fn append_redacted(&self, raw: String) {
         if let Some(path) = &self.log_file {
-            let raw = format!("progress {:?}", params);
             let line = crate::process::redact(&raw);
             append_log_line(path.clone(), self.server.clone(), line).await;
         }

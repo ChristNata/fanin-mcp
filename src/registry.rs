@@ -93,13 +93,13 @@ impl Registry {
             return Ok(entry);
         }
 
-        // Clone the minimal data we need while holding the read lock,
-        // then drop the lock before the await (D-007 / GOTCHA #16).
+        // Borrow the server config from the Arc-held TomlConfig (no lock needed here).
+        // The reference is valid across the resolution work and the connect await.
+        // (D-007 / GOTCHA #16 — no entries lock is held.)
         let server_config =
             self.config
                 .servers
                 .get(server)
-                .cloned()
                 .ok_or_else(|| ToolError::UnknownServer {
                     server: server.to_string(),
                 })?;
@@ -113,8 +113,7 @@ impl Registry {
         // good subset. The structured error is returned later from call_tool when
         // the caller targets the bad LHS (the echo_env contract).
         let store = crate::credentials::build_store(cred_choice);
-        let mut resolved_env: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut resolved_env = HashMap::new();
         for (lhs, raw) in &server_config.env {
             match crate::process::resolve_env_value(&*store, cred_choice, server, raw) {
                 Ok(v) => {
@@ -128,7 +127,7 @@ impl Registry {
             }
         }
 
-        let entry = Arc::new(connect(server, &server_config, &resolved_env).await?);
+        let entry = Arc::new(connect(server, server_config, &resolved_env).await?);
         self.entries
             .write()
             .await

@@ -96,15 +96,12 @@ async fn main() -> ExitCode {
     init_tracing();
 
     let cli = Cli::parse();
-    let config = CliConfig::from_flags(
-        cli.namespace.clone(),
-        cli.config.clone(),
-        cli.credential_store,
-    );
+    let credential_store = cli.credential_store;
+    let config = CliConfig::from_flags(cli.namespace, cli.config, credential_store);
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => run_serve(config).await,
-        Command::Cred { action } => run_cred(action, cli.credential_store),
+        Command::Cred { action } => run_cred(action, credential_store),
     }
 }
 

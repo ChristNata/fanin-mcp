@@ -411,8 +411,8 @@ fn invoke_tool_tool() -> Tool {
     Tool::new("invoke_tool", INVOKE_TOOL_DESC, Arc::new(schema)).with_annotations(annotations)
 }
 
-/// Build a JSON-schema object with optional string properties.
-fn optional_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
+/// Build a JSON-schema object with optional or required string properties.
+fn string_object_schema(props: &[&str], required: bool) -> Arc<JsonObject> {
     let mut schema = serde_json::Map::new();
     schema.insert(
         "type".to_string(),
@@ -426,30 +426,22 @@ fn optional_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
         "properties".to_string(),
         serde_json::Value::Object(properties),
     );
+    if required {
+        let req: Vec<_> = props
+            .iter()
+            .map(|p| serde_json::Value::String((*p).into()))
+            .collect();
+        schema.insert("required".to_string(), serde_json::Value::Array(req));
+    }
     Arc::new(schema)
 }
 
-/// Build a JSON-schema object with required string properties.
+fn optional_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
+    string_object_schema(props, false)
+}
+
 fn required_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
-    let mut schema = serde_json::Map::new();
-    schema.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".into()),
-    );
-    let mut properties = serde_json::Map::new();
-    let required: Vec<serde_json::Value> = props
-        .iter()
-        .map(|p| serde_json::Value::String((*p).into()))
-        .collect();
-    for p in props {
-        properties.insert((*p).to_string(), serde_json::json!({ "type": "string" }));
-    }
-    schema.insert(
-        "properties".to_string(),
-        serde_json::Value::Object(properties),
-    );
-    schema.insert("required".to_string(), serde_json::Value::Array(required));
-    Arc::new(schema)
+    string_object_schema(props, true)
 }
 
 /// Render the structured not-implemented tool result.
