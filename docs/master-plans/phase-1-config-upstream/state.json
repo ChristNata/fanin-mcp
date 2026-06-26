@@ -1,0 +1,41 @@
+{
+  "feature": "phase-1-config-upstream",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "plan-complete",
+  "steps": {
+    "plan": {
+      "status": "complete",
+      "at": "2026-06-26T00:00:00Z"
+    },
+    "test-create": {
+      "status": "pending",
+      "at": null
+    },
+    "implement": {
+      "status": "pending",
+      "at": null
+    },
+    "simplify": {
+      "status": "pending",
+      "at": null
+    },
+    "review-alignment": {
+      "status": "pending",
+      "at": null
+    },
+    "review-adversarial": {
+      "status": "pending",
+      "at": null
+    },
+    "review-general": {
+      "status": "pending",
+      "at": null
+    },
+    "review-synthesis": {
+      "status": "pending",
+      "at": null
+    }
+  }
+}
