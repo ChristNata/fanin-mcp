@@ -63,6 +63,10 @@ tokio = { version = "1", features = [
     "time",
 ] }
 serde_json = "1"
+# tempfile — Phase 1 config-fixture helper writes TOML configs and log files
+# to the OS temp dir. Held for the lifetime of the spawned child so the path
+# stays valid on Windows (where the file is opened by the child).
+tempfile = "3"
 
 # --- Explicit target declarations --------------------------------------------
 # With `autobins = false` / `autotests = false` above, these are the only

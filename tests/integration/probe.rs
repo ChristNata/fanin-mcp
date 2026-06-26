@@ -17,12 +17,15 @@ use tokio::time::timeout;
 use crate::common;
 
 /// The exact, ordered set of probe tool names (master criterion 7).
-const PROBE_TOOL_NAMES: [&str; 5] = [
+const PROBE_TOOL_NAMES: [&str; 8] = [
     "echo_ok",
     "always_error",
     "slow_tool",
     "dangerous_noop",
     "needs_sampling",
+    "echo_image",
+    "needs_elicitation",
+    "needs_roots",
 ];
 
 fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -59,11 +62,12 @@ async fn probe_builds_and_runs_over_stdio_without_node() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// Criterion 7 (Probe inventory gate): the probe exposes exactly five tools
-/// over stdio: echo_ok, always_error, slow_tool, dangerous_noop, needs_sampling
-/// (D-016, master.md §P0.3).
+/// Criterion 7 (Probe inventory gate): the probe exposes exactly eight tools
+/// over stdio: echo_ok, always_error, slow_tool, dangerous_noop,
+/// needs_sampling, echo_image, needs_elicitation, needs_roots (D-016,
+/// master.md §P0.3).
 #[tokio::test]
-async fn probe_exposes_exactly_five_named_tools() {
+async fn probe_exposes_exactly_eight_named_tools() {
     let mut child = common::spawn_bin("probe-server").await;
     common::initialize(&mut child).await;
 
@@ -77,8 +81,8 @@ async fn probe_exposes_exactly_five_named_tools() {
 
     assert_eq!(
         tools.len(),
-        5,
-        "probe must expose exactly 5 tools, got {}: {tools:?}",
+        8,
+        "probe must expose exactly 8 tools, got {}: {tools:?}",
         tools.len()
     );
     for name in PROBE_TOOL_NAMES {

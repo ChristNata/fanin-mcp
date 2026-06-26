@@ -16,6 +16,12 @@
 mod common;
 
 mod aggregator;
+mod config;
+mod discovery;
+mod gate;
+mod invoke;
 mod manual_e2e;
 mod pinning;
 mod probe;
+mod registry;
+mod reverse_traffic;

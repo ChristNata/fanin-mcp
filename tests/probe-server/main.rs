@@ -19,10 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, CreateMessageRequest,
-    CreateMessageRequestParams, Implementation, InitializeResult, JsonObject, ListToolsResult,
-    PaginatedRequestParams, SamplingMessage, ServerCapabilities, ServerInfo, ServerRequest, Tool,
-    ToolAnnotations,
+    CallToolRequestParams, CallToolResult, Content, CreateElicitationRequest,
+    CreateElicitationRequestParams, CreateMessageRequest, CreateMessageRequestParams,
+    ElicitationSchema, Implementation, InitializeResult, JsonObject, ListRootsRequest,
+    ListToolsResult, PaginatedRequestParams, SamplingMessage, ServerCapabilities, ServerInfo,
+    ServerRequest, Tool, ToolAnnotations,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
@@ -36,6 +37,9 @@ const ALWAYS_ERROR: &str = "always_error";
 const SLOW_TOOL: &str = "slow_tool";
 const DANGEROUS_NOOP: &str = "dangerous_noop";
 const NEEDS_SAMPLING: &str = "needs_sampling";
+const ECHO_IMAGE: &str = "echo_image";
+const NEEDS_ELICITATION: &str = "needs_elicitation";
+const NEEDS_ROOTS: &str = "needs_roots";
 const SAMPLING_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The probe server fixture.
@@ -52,7 +56,7 @@ impl ServerHandler for Probe {
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
     }
 
-    /// Return exactly the five probe tools (D-016, master.md §P0.3).
+    /// Return exactly the eight probe tools (D-016, master.md §P0.3).
     ///
     /// Fully static — no upstream fan-out.
     fn list_tools(
@@ -83,7 +87,7 @@ impl ServerHandler for Probe {
     }
 }
 
-/// Build the five probe tool definitions.
+/// Build the eight probe tool definitions.
 fn probe_tools() -> Vec<Tool> {
     vec![
         echo_ok_tool(),
@@ -91,6 +95,9 @@ fn probe_tools() -> Vec<Tool> {
         slow_tool_tool(),
         dangerous_noop_tool(),
         needs_sampling_tool(),
+        echo_image_tool(),
+        needs_elicitation_tool(),
+        needs_roots_tool(),
     ]
 }
 
@@ -162,6 +169,40 @@ fn needs_sampling_tool() -> Tool {
     )
 }
 
+/// `echo_image` — no arguments; returns a NON-TEXT content block (a small PNG
+/// image Content). Exercises the byte-faithful non-text preservation path
+/// (D-004, GOTCHA #4): a proxy that `to_string()`'d the content array would
+/// collapse this to a text block.
+fn echo_image_tool() -> Tool {
+    Tool::new(
+        ECHO_IMAGE,
+        "Returns a non-text image content block (small base64 PNG).",
+        empty_object_schema(),
+    )
+}
+
+/// `needs_elicitation` — no arguments; sends an `elicitation/create` request
+/// to the client when called (D-008, GOTCHA #2). Mirrors `needs_sampling`,
+/// swapping the reverse-traffic request type.
+fn needs_elicitation_tool() -> Tool {
+    Tool::new(
+        NEEDS_ELICITATION,
+        "Sends an elicitation/create request to the client when called.",
+        empty_object_schema(),
+    )
+}
+
+/// `needs_roots` — no arguments; sends a `roots/list` request to the client
+/// when called (D-008, GOTCHA #2). Mirrors `needs_sampling`, swapping the
+/// reverse-traffic request type.
+fn needs_roots_tool() -> Tool {
+    Tool::new(
+        NEEDS_ROOTS,
+        "Sends a roots/list request to the client when called.",
+        empty_object_schema(),
+    )
+}
+
 /// Build a JSON-schema object with optional string properties.
 fn optional_string_object_schema(props: &[&str]) -> Arc<JsonObject> {
     let mut schema = serde_json::Map::new();
@@ -209,6 +250,9 @@ async fn dispatch(
         SLOW_TOOL => slow_tool(arguments).await,
         DANGEROUS_NOOP => dangerous_noop(),
         NEEDS_SAMPLING => needs_sampling(context),
+        ECHO_IMAGE => echo_image(),
+        NEEDS_ELICITATION => needs_elicitation(context),
+        NEEDS_ROOTS => needs_roots(context),
         _ => unknown_tool_result(name),
     }
 }
@@ -290,6 +334,90 @@ fn build_sampling_request() -> ServerRequest {
     )];
     let params = CreateMessageRequestParams::new(messages, 64);
     ServerRequest::CreateMessageRequest(CreateMessageRequest::new(params))
+}
+
+/// `echo_image`: return a NON-TEXT image content block (D-004, GOTCHA #4).
+///
+/// No context, no outbound request — the load-bearing detail is the image
+/// `Content` block in the success result. A proxy that `to_string()`'d the
+/// content array would collapse this to a text block, breaking byte-faithful
+/// non-text preservation.
+fn echo_image() -> CallToolResult {
+    // A 1x1 transparent PNG, base64-encoded. Tiny but a valid image payload.
+    const TINY_PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYPhfDwAChwGA60s6IgAAAABJRU5ErkJggg==";
+    CallToolResult::success(vec![Content::image(TINY_PNG_B64, "image/png")])
+}
+
+/// `needs_elicitation`: send an `elicitation/create` request from the server
+/// role up to the client (D-008). Mirrors `needs_sampling`, swapping the
+/// reverse-traffic request type.
+///
+/// Nothing in Phase 0 answers it, so the probe must not block its `call_tool`
+/// future on the response — that would hang the whole server (GOTCHA #2).
+fn needs_elicitation(context: RequestContext<RoleServer>) -> CallToolResult {
+    let peer = context.peer.clone();
+    let request = build_elicitation_request();
+    tokio::spawn(async move {
+        // The load-bearing side effect is the outbound JSON-RPC request on
+        // stdout. The unanswered response may time out or error.
+        if tokio::time::timeout(SAMPLING_REQUEST_TIMEOUT, peer.send_request(request))
+            .await
+            .is_err()
+        {
+            tracing::warn!("probe-server elicitation/create request timed out");
+        }
+    });
+    CallToolResult::success(vec![Content::text(
+        "needs_elicitation: sent elicitation/create request to client".to_string(),
+    )])
+}
+
+/// Build the `elicitation/create` request payload.
+///
+/// Minimal form-based payload that satisfies the rmcp validator.
+fn build_elicitation_request() -> ServerRequest {
+    let schema = ElicitationSchema::builder()
+        .required_string("answer")
+        .build()
+        .expect("a minimal elicitation schema with one required string is valid");
+    let params = CreateElicitationRequestParams::FormElicitationParams {
+        meta: None,
+        message: "probe needs_elicitation: please answer this elicitation.".to_string(),
+        requested_schema: schema,
+    };
+    ServerRequest::CreateElicitationRequest(CreateElicitationRequest::new(params))
+}
+
+/// `needs_roots`: send a `roots/list` request from the server role up to the
+/// client (D-008). Mirrors `needs_sampling`, swapping the reverse-traffic
+/// request type.
+///
+/// Nothing in Phase 0 answers it, so the probe must not block its `call_tool`
+/// future on the response — that would hang the whole server (GOTCHA #2).
+fn needs_roots(context: RequestContext<RoleServer>) -> CallToolResult {
+    let peer = context.peer.clone();
+    let request = build_roots_request();
+    tokio::spawn(async move {
+        // The load-bearing side effect is the outbound JSON-RPC request on
+        // stdout. The unanswered response may time out or error.
+        if tokio::time::timeout(SAMPLING_REQUEST_TIMEOUT, peer.send_request(request))
+            .await
+            .is_err()
+        {
+            tracing::warn!("probe-server roots/list request timed out");
+        }
+    });
+    CallToolResult::success(vec![Content::text(
+        "needs_roots: sent roots/list request to client".to_string(),
+    )])
+}
+
+/// Build the `roots/list` request payload.
+///
+/// `ListRootsRequest` carries no params; the request itself is the payload.
+fn build_roots_request() -> ServerRequest {
+    ServerRequest::ListRootsRequest(ListRootsRequest::default())
 }
 
 /// Structured unknown-tool result — never a JSON-RPC error (D-005).

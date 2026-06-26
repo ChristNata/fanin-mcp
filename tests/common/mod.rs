@@ -178,6 +178,34 @@ impl JsonRpcChild {
         self._stderr.take()
     }
 
+    /// Drain all available stdout within `deadline` without parsing it as
+    /// JSON. Returns the raw bytes. Used by startup-failure tests to assert
+    /// that NO bytes were written to stdout (GOTCHA #1): a config-validation
+    /// error must route to stderr/tracing, never to the JSON-RPC stream.
+    ///
+    /// Reads until EOF or deadline. A correct startup-failure path closes
+    /// stdout on exit, so EOF within the deadline is the happy path; a hang
+    /// fails the test on the deadline.
+    pub async fn drain_stdout_raw(&mut self, deadline: Duration) -> Vec<u8> {
+        let mut out = Vec::new();
+        let _ = timeout(deadline, async {
+            use tokio::io::AsyncReadExt;
+            // The BufReader is already line-buffered; read_to_end would block
+            // until EOF. We poll with a short per-read timeout instead so a
+            // partial line (no trailing newline) still surfaces.
+            let mut buf = [0u8; 1024];
+            loop {
+                match self.stdout.read(&mut buf).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+        })
+        .await;
+        out
+    }
+
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.write_u8(b'\n').await?;
@@ -221,6 +249,62 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
     let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn `{path}`: {e}"));
+
+    let stdin = child.stdin.take().expect("child stdin was piped");
+    let stdout = child.stdout.take().expect("child stdout was piped");
+    let stderr = child.stderr.take().expect("child stderr was piped");
+
+    JsonRpcChild {
+        child: ChildGuard { child },
+        stdin,
+        stdout: BufReader::new(stdout),
+        next_id: 1,
+        _stderr: Some(stderr),
+    }
+}
+
+// ---- Phase 1 config-aware spawn helpers -----------------------------------
+
+/// Spawn `fanin-mcp` with the given `--config` path and optional
+/// `--namespace`. Phase 1 tests use this instead of `spawn_bin("fanin-mcp")`
+/// so the aggregator loads the TOML config and validates the namespace
+/// before serving starts.
+///
+/// `config_path` is passed verbatim to `--config`; the caller is responsible
+/// for keeping the temp config file alive (see `fixtures::ConfigFile`).
+pub async fn spawn_fanin_with_config(
+    config_path: &str,
+    namespace: Option<&str>,
+) -> JsonRpcChild {
+    let mut extra: Vec<String> = Vec::new();
+    extra.push("--config".to_string());
+    extra.push(config_path.to_string());
+    if let Some(ns) = namespace {
+        extra.push("--namespace".to_string());
+        extra.push(ns.to_string());
+    }
+    spawn_fanin_with_args(&extra).await
+}
+
+/// Spawn `fanin-mcp` with an explicit argv tail (after the bin name). Used by
+/// negative startup tests that pass invalid configs/namespaces and expect the
+/// process to exit BEFORE serving — those tests do not need a JSON-RPC
+/// connection, just the exit status and a clean-stdout observation.
+pub async fn spawn_fanin_with_args(args: &[String]) -> JsonRpcChild {
+    let path = std::env::var("CARGO_BIN_EXE_fanin-mcp").unwrap_or_else(|_| {
+        panic!(
+            "cargo did not inject CARGO_BIN_EXE_fanin-mcp; the [[bin]] target \
+             `fanin-mcp` must be built before the test binary runs"
+        )
+    });
+    let mut cmd = Command::new(&path);
+    cmd.args(args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn fanin-mcp: {e}"));
 
     let stdin = child.stdin.take().expect("child stdin was piped");
     let stdout = child.stdout.take().expect("child stdout was piped");
@@ -333,3 +417,4 @@ pub async fn list_tools(child: &mut JsonRpcChild) -> Value {
 }
 
 pub mod expectations;
+pub mod fixtures;
