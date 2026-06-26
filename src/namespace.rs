@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::config::{NamespaceConfig, TomlConfig, DEFAULT_NAMESPACE};
+use crate::config::{TomlConfig, DEFAULT_NAMESPACE};
 
 /// The active namespace ACL for this session.
 #[derive(Debug, Clone)]
@@ -19,15 +19,12 @@ impl ActiveNamespace {
         } else {
             selected.to_string()
         };
-        let namespace = config
+        let servers = config
             .namespaces
             .get(&name)
-            .cloned()
-            .unwrap_or_else(|| NamespaceConfig { servers: Vec::new() });
-        Self {
-            name,
-            servers: namespace.servers.into_iter().collect(),
-        }
+            .map(|namespace| namespace.servers.iter().cloned().collect())
+            .unwrap_or_default();
+        Self { name, servers }
     }
 
     /// Returns the active namespace name.

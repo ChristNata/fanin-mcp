@@ -103,12 +103,12 @@ impl ServerHandler for Aggregator {
     ///
     /// Returns `Ok(CallToolResult::error(...))` — a tool-level result with
     /// `isError: true`, never a JSON-RPC error (D-005, GOTCHA #3).
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_ {
-        async move { Ok(self.dispatch_tool(request).await) }
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.dispatch_tool(request).await)
     }
 }
 
@@ -124,10 +124,16 @@ impl Aggregator {
 
     async fn handle_list_tools(&self, arguments: Option<JsonObject>) -> CallToolResult {
         let Some(registry) = &self.registry else {
-            return ToolError::NotImplemented { tool: "list_tools".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "list_tools".to_string(),
+            }
+            .as_result();
         };
         let Some(namespace) = &self.namespace else {
-            return ToolError::NotImplemented { tool: "list_tools".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "list_tools".to_string(),
+            }
+            .as_result();
         };
 
         let servers = if let Some(server) = arguments
@@ -136,10 +142,17 @@ impl Aggregator {
             .and_then(|v| v.as_str())
         {
             if !registry.has_server(server) {
-                return ToolError::UnknownServer { server: server.to_string() }.as_result();
+                return ToolError::UnknownServer {
+                    server: server.to_string(),
+                }
+                .as_result();
             }
             if !namespace.is_server_allowed(server) {
-                return ToolError::NamespaceDenied { server: server.to_string(), tool: None }.as_result();
+                return ToolError::NamespaceDenied {
+                    server: server.to_string(),
+                    tool: None,
+                }
+                .as_result();
             }
             vec![server.to_string()]
         } else {
@@ -165,7 +178,9 @@ impl Aggregator {
             }
         }
 
-        CallToolResult::success(vec![Content::text(serde_json::Value::Array(rows).to_string())])
+        CallToolResult::success(vec![Content::text(
+            serde_json::Value::Array(rows).to_string(),
+        )])
     }
 
     async fn handle_get_tool_schema(&self, arguments: Option<JsonObject>) -> CallToolResult {
@@ -174,61 +189,114 @@ impl Aggregator {
             .and_then(|a| a.get("name"))
             .and_then(|v| v.as_str())
         else {
-            return ToolError::InvalidRequest { tool: "get_tool_schema".to_string(), message: "missing string `name`".to_string() }.as_result();
+            return ToolError::InvalidRequest {
+                tool: "get_tool_schema".to_string(),
+                message: "missing string `name`".to_string(),
+            }
+            .as_result();
         };
         let (server, tool) = match parse_server_tool(name) {
             Some(parts) => parts,
-            None => return ToolError::InvalidRequest { tool: "get_tool_schema".to_string(), message: "name must have format server__tool".to_string() }.as_result(),
+            None => {
+                return ToolError::InvalidRequest {
+                    tool: "get_tool_schema".to_string(),
+                    message: "name must have format server__tool".to_string(),
+                }
+                .as_result()
+            }
         };
         let Some(registry) = &self.registry else {
-            return ToolError::NotImplemented { tool: "get_tool_schema".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "get_tool_schema".to_string(),
+            }
+            .as_result();
         };
         let Some(namespace) = &self.namespace else {
-            return ToolError::NotImplemented { tool: "get_tool_schema".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "get_tool_schema".to_string(),
+            }
+            .as_result();
         };
         if !registry.has_server(server) {
-            return ToolError::UnknownServer { server: server.to_string() }.as_result();
+            return ToolError::UnknownServer {
+                server: server.to_string(),
+            }
+            .as_result();
         }
         if !namespace.is_tool_allowed(server, tool) {
-            return ToolError::NamespaceDenied { server: server.to_string(), tool: Some(tool.to_string()) }.as_result();
+            return ToolError::NamespaceDenied {
+                server: server.to_string(),
+                tool: Some(tool.to_string()),
+            }
+            .as_result();
         }
         let tools = match registry.inventory(server).await {
             Ok(tools) => tools,
             Err(e) => return e.as_result(),
         };
         let Some(found) = tools.into_iter().find(|t| t.name.as_ref() == tool) else {
-            return ToolError::UnknownTool { server: server.to_string(), tool: tool.to_string() }.as_result();
+            return ToolError::UnknownTool {
+                server: server.to_string(),
+                tool: tool.to_string(),
+            }
+            .as_result();
         };
-        CallToolResult::success(vec![Content::text(serde_json::Value::Object((*found.input_schema).clone()).to_string())])
+        CallToolResult::success(vec![Content::text(
+            serde_json::Value::Object((*found.input_schema).clone()).to_string(),
+        )])
     }
 
     async fn handle_invoke_tool(&self, arguments: Option<JsonObject>) -> CallToolResult {
         let Some(args) = arguments else {
-            return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "missing arguments object".to_string() }.as_result();
+            return ToolError::InvalidRequest {
+                tool: "invoke_tool".to_string(),
+                message: "missing arguments object".to_string(),
+            }
+            .as_result();
         };
         let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-            return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "missing string `name`".to_string() }.as_result();
+            return ToolError::InvalidRequest {
+                tool: "invoke_tool".to_string(),
+                message: "missing string `name`".to_string(),
+            }
+            .as_result();
         };
         let (server, tool) = match parse_server_tool(name) {
             Some(parts) => parts,
-            None => return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "name must have format server__tool".to_string() }.as_result(),
+            None => {
+                return ToolError::InvalidRequest {
+                    tool: "invoke_tool".to_string(),
+                    message: "name must have format server__tool".to_string(),
+                }
+                .as_result()
+            }
         };
         let Some(registry) = &self.registry else {
-            return ToolError::NotImplemented { tool: "invoke_tool".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "invoke_tool".to_string(),
+            }
+            .as_result();
         };
         let Some(namespace) = &self.namespace else {
-            return ToolError::NotImplemented { tool: "invoke_tool".to_string() }.as_result();
+            return ToolError::NotImplemented {
+                tool: "invoke_tool".to_string(),
+            }
+            .as_result();
         };
         if !registry.has_server(server) {
-            return ToolError::UnknownServer { server: server.to_string() }.as_result();
+            return ToolError::UnknownServer {
+                server: server.to_string(),
+            }
+            .as_result();
         }
         if !namespace.is_tool_allowed(server, tool) {
-            return ToolError::NamespaceDenied { server: server.to_string(), tool: Some(tool.to_string()) }.as_result();
+            return ToolError::NamespaceDenied {
+                server: server.to_string(),
+                tool: Some(tool.to_string()),
+            }
+            .as_result();
         }
-        let raw_arguments = args
-            .get("arguments")
-            .and_then(|v| v.as_object())
-            .cloned();
+        let raw_arguments = args.get("arguments").and_then(|v| v.as_object()).cloned();
         match registry.call_tool(server, tool, raw_arguments).await {
             Ok(result) => result,
             Err(e) => e.as_result(),

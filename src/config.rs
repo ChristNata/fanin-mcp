@@ -123,13 +123,9 @@ pub struct NamespaceConfig {
 /// `namespace` is the value of `--namespace` (empty string when the flag was
 /// omitted). An empty value selects the `default` namespace (see
 /// [`DEFAULT_NAMESPACE`]).
-pub fn load_and_validate(
-    config_path: &Path,
-    namespace: &str,
-) -> Result<TomlConfig, StartupError> {
+pub fn load_and_validate(config_path: &Path, namespace: &str) -> Result<TomlConfig, StartupError> {
     let contents = std::fs::read_to_string(config_path).map_err(StartupError::ReadConfig)?;
-    let config: TomlConfig =
-        toml::from_str(&contents).map_err(StartupError::ParseConfig)?;
+    let config: TomlConfig = toml::from_str(&contents).map_err(StartupError::ParseConfig)?;
     config.validate(namespace)?;
     Ok(config)
 }
@@ -150,12 +146,7 @@ impl TomlConfig {
         // 2. stdio servers must declare a `command`. A missing command fails
         //    startup (a server table without the spawn entry is malformed).
         for (name, server) in &self.servers {
-            if server.command.as_ref().map(|c| c.trim()).is_none()
-                || server
-                    .command
-                    .as_ref()
-                    .map(|c| c.trim().is_empty())
-                    .unwrap_or(true)
+            if !matches!(server.command.as_deref().map(str::trim), Some(command) if !command.is_empty())
             {
                 return Err(StartupError::StdioServerMissingCommand {
                     server: name.clone(),
@@ -197,7 +188,7 @@ fn validate_server_name(name: &str) -> Result<(), StartupError> {
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !valid {
-        let bad: Vec<char> = name
+        let bad: String = name
             .chars()
             .filter(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
             .collect();
@@ -205,7 +196,7 @@ fn validate_server_name(name: &str) -> Result<(), StartupError> {
             server: name.to_string(),
             reason: format!(
                 "server name must match [a-z0-9-]+; found disallowed character(s): {}",
-                bad.iter().collect::<String>()
+                bad
             ),
         });
     }

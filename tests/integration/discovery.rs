@@ -82,7 +82,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
     });
     parsed
         .as_array()
-        .map(|a| a.clone())
+        .cloned()
         .unwrap_or_else(|| panic!("list_tools text content must be a JSON array; got: {parsed:?}"))
 }
 

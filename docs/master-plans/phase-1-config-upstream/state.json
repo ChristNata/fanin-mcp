@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "simplify",
+  "current_step": "review-alignment",
   "steps": {
     "plan": {
       "status": "complete",
@@ -18,8 +18,8 @@
       "at": "2026-06-26T15:50:00Z"
     },
     "simplify": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-26T16:10:00Z"
     },
     "review-alignment": {
       "status": "pending",
