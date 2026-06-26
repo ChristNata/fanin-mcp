@@ -30,8 +30,9 @@ pub enum CredentialStoreChoice {
 /// Abstraction over a credential backend.
 /// All operations are scoped to a server (the service id is "fanin-mcp/<server>").
 ///
-/// The `get` method is part of the Phase 1 public API (used by Phase 2 interpolation)
-/// but not yet invoked inside the Phase 1 binary surface.
+/// `get` is invoked at spawn time by the registry to resolve `${VAR}` env
+/// placeholders (preferred backend → process-env fallback → structured error);
+/// `set` / `delete` / `list_names` back the `cred set | rm | list` subcommands.
 #[allow(dead_code)]
 pub trait CredentialStore: Send + Sync {
     /// Retrieve a credential value if present.

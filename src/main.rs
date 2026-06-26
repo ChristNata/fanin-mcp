@@ -120,9 +120,9 @@ async fn main() -> ExitCode {
 async fn run_serve(config: CliConfig) -> ExitCode {
     // Load + validate the config BEFORE serving. A failure here must exit
     // before `serve(stdio())` begins so the JSON-RPC stream is never corrupted
-    // (GOTCHA #1). The loaded config is not yet wired into the aggregator —
-    // registry/forward/invoke are later sub-phases; Phase 1 config sub-phase
-    // only needs startup validation to gate serving.
+    // (GOTCHA #1). On success the loaded config is wired into the aggregator
+    // below: it builds the active namespace, the lazy upstream `Registry` (with
+    // the selected credential store), and the meta-tool dispatch path.
     let loaded = if let Some(path) = config.config_path.as_ref() {
         match crate::config::load_and_validate(path, &config.namespace) {
             Ok(loaded) => Some(loaded),
