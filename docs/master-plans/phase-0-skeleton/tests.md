@@ -5,8 +5,12 @@ objective gate runs it. Test files are read-only to every later stage.
 
 ## Stack & runner
 
-- **Runner:** `cargo nextest run --workspace` (main suite) +
-  `cargo test --workspace --doc` (doc-tests, separately).
+- **Runner:** `cargo nextest run --workspace` (main suite). Doc-tests are
+  N/A in Phase 0: this is a binary-only crate with `[[bin]]` targets and no
+  library target, so `cargo test --workspace --doc` errors with "no
+  library targets found in package fanin-mcp". Re-add the `--doc` runner
+  only when a library target exists (the implementer does NOT add one just
+  to satisfy a doc-test line).
 - **Async:** `#[tokio::test]` single-threaded default; concurrency tests use
   `flavor = "multi_thread"` (none in Phase 0).
 - **Wire-level by default.** Tests spawn the built binary and speak raw

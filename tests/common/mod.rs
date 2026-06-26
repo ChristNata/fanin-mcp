@@ -80,11 +80,7 @@ pub struct JsonRpcChild {
 impl JsonRpcChild {
     /// Send a JSON-RPC request and await the matching response (by id).
     /// Fails the test on hang (RPC_DEADLINE) or on a non-matching id.
-    pub async fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-    ) -> Value {
+    pub async fn request(&mut self, method: &str, params: Value) -> Value {
         let id = self.send_request(method, params).await;
         self.wait_for_id(id).await
     }
@@ -226,18 +222,9 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn `{path}`: {e}"));
 
-    let stdin = child
-        .stdin
-        .take()
-        .expect("child stdin was piped");
-    let stdout = child
-        .stdout
-        .take()
-        .expect("child stdout was piped");
-    let stderr = child
-        .stderr
-        .take()
-        .expect("child stderr was piped");
+    let stdin = child.stdin.take().expect("child stdin was piped");
+    let stdout = child.stdout.take().expect("child stdout was piped");
+    let stderr = child.stderr.take().expect("child stderr was piped");
 
     JsonRpcChild {
         child: ChildGuard { child },
@@ -288,7 +275,10 @@ pub async fn initialize(child: &mut JsonRpcChild) -> Value {
 
     // The initialized notification completes the handshake.
     child
-        .notify("notifications/initialized", Value::Object(Default::default()))
+        .notify(
+            "notifications/initialized",
+            Value::Object(Default::default()),
+        )
         .await;
 
     result
@@ -314,10 +304,7 @@ pub fn assert_is_error_result(result: &Value, ctx: &str) {
     let content = result
         .get("content")
         .unwrap_or_else(|| panic!("{ctx}: CallToolResult missing content"));
-    assert!(
-        content.is_array(),
-        "{ctx}: content must be an array"
-    );
+    assert!(content.is_array(), "{ctx}: content must be an array");
     assert!(
         !content.as_array().unwrap().is_empty(),
         "{ctx}: not-implemented error must carry at least one content block"
@@ -327,19 +314,22 @@ pub fn assert_is_error_result(result: &Value, ctx: &str) {
 /// Convenience: call a tool by name with the given arguments object and return
 /// the raw JSON-RPC response.
 pub async fn call_tool(child: &mut JsonRpcChild, name: &str, arguments: Value) -> Value {
-    child.request(
-        "tools/call",
-        serde_json::json!({
-            "name": name,
-            "arguments": arguments,
-        }),
-    )
-    .await
+    child
+        .request(
+            "tools/call",
+            serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+            }),
+        )
+        .await
 }
 
 /// Convenience: list tools and return the raw JSON-RPC response.
 pub async fn list_tools(child: &mut JsonRpcChild) -> Value {
-    child.request("tools/list", Value::Object(Default::default())).await
+    child
+        .request("tools/list", Value::Object(Default::default()))
+        .await
 }
 
 pub mod expectations;

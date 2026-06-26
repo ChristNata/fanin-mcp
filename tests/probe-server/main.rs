@@ -1,11 +1,5 @@
 //! probe-server — in-repo MCP probe fixture for fanin-mcp integration tests.
 //!
-//! P0.3: a standalone rmcp stdio MCP server binary (D-016) exposing exactly
-//! five tools — `echo_ok`, `always_error`, `slow_tool`, `dangerous_noop`, and
-//! `needs_sampling` — used by later integration tests as a stand-in for real
-//! upstreams. It builds and runs with no Node, npx, Docker, or system service:
-//! it is a pure Rust rmcp binary.
-//!
 //! GOTCHA #1: stdout is the MCP transport once `serve(stdio())` starts. No
 //! `println!` / `print!` / `dbg!` exists in this crate; all diagnostics route to
 //! stderr via `tracing`.
@@ -25,9 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult, JsonObject,
-    ListToolsResult, PaginatedRequestParams, SamplingMessage, ServerCapabilities, ServerInfo,
-    ServerRequest, CreateMessageRequest, CreateMessageRequestParams, Tool, ToolAnnotations,
+    CallToolRequestParams, CallToolResult, Content, CreateMessageRequest,
+    CreateMessageRequestParams, Implementation, InitializeResult, JsonObject, ListToolsResult,
+    PaginatedRequestParams, SamplingMessage, ServerCapabilities, ServerInfo, ServerRequest, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
@@ -41,19 +36,16 @@ const ALWAYS_ERROR: &str = "always_error";
 const SLOW_TOOL: &str = "slow_tool";
 const DANGEROUS_NOOP: &str = "dangerous_noop";
 const NEEDS_SAMPLING: &str = "needs_sampling";
+const SAMPLING_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The probe server fixture.
 ///
-/// Stateless beyond the rmcp machinery: every tool behavior is a pure
-/// function of the `call_tool` request. There is no upstream registry, no
-/// shared mutable state, and no configuration — the probe is intentionally
-/// minimal so integration tests get deterministic fixtures.
+/// Stateless beyond the rmcp machinery.
 #[derive(Debug, Clone, Default)]
 pub struct Probe;
 
 impl ServerHandler for Probe {
-    /// Advertise the server name/version and the `tools` capability so clients
-    /// can call `tools/list` (GOTCHA #8).
+    /// Advertise server info and the `tools` capability (GOTCHA #8).
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
         InitializeResult::new(capabilities)
@@ -62,9 +54,7 @@ impl ServerHandler for Probe {
 
     /// Return exactly the five probe tools (D-016, master.md §P0.3).
     ///
-    /// Fully static — no upstream fan-out. The tool definitions, descriptions,
-    /// and annotations are fixed for the lifetime of the fixture so the wire
-    /// contract the tests assert on never drifts.
+    /// Fully static — no upstream fan-out.
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -86,10 +76,8 @@ impl ServerHandler for Probe {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_ {
         let name = request.name.to_string();
-        // `CallToolRequestParams::arguments` is `Option<JsonObject>` (a Map).
-        // Convert to a `serde_json::Value::Object` so the dispatch helpers can
-        // treat the payload uniformly (echo searches for a substring, slow_tool
-        // reads a field).
+        // Convert the optional JSON object so dispatch helpers can handle
+        // payloads uniformly.
         let arguments = request.arguments.map(serde_json::Value::Object);
         async move { Ok(dispatch(name, arguments, context).await) }
     }
@@ -139,7 +127,11 @@ fn slow_tool_tool() -> Tool {
         serde_json::json!({ "type": "integer", "description": "Milliseconds to wait before returning." }),
     );
     schema.insert("properties".to_string(), serde_json::Value::Object(props));
-    Tool::new(SLOW_TOOL, "Waits for the requested delay, then returns.", Arc::new(schema))
+    Tool::new(
+        SLOW_TOOL,
+        "Waits for the requested delay, then returns.",
+        Arc::new(schema),
+    )
 }
 
 /// `dangerous_noop` — no arguments; harmless no-op that ADVERTISES destructive
@@ -204,9 +196,8 @@ fn empty_object_schema() -> Arc<JsonObject> {
 
 /// Dispatch a tool name to its behavior, returning a structured `CallToolResult`.
 ///
-/// Unknown names return a structured error result (never a JSON-RPC error),
-/// mirroring the aggregator's not-implemented contract (D-005). `slow_tool` is
-/// async because it awaits `tokio::time::sleep`; the rest resolve synchronously.
+/// Unknown names return a structured error result, never a JSON-RPC error
+/// (D-005).
 async fn dispatch(
     name: String,
     arguments: Option<serde_json::Value>,
@@ -222,13 +213,13 @@ async fn dispatch(
     }
 }
 
-/// `echo_ok`: echo the supplied input. The test searches content for the
-/// supplied substring, so the echoed text must contain the input payload. If a
-/// `message` string argument is present, echo it verbatim; otherwise echo the
-/// whole arguments JSON so the payload is still recoverable.
+/// `echo_ok`: echo the supplied input.
 fn echo_ok(arguments: Option<serde_json::Value>) -> CallToolResult {
     let text = match arguments.as_ref().and_then(|a| a.get("message")) {
-        Some(msg) => msg.as_str().map(|s| s.to_string()).unwrap_or_else(|| msg.to_string()),
+        Some(msg) => msg
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| msg.to_string()),
         None => arguments
             .map(|a| a.to_string())
             .unwrap_or_else(|| String::from("(no input)")),
@@ -247,13 +238,7 @@ fn always_error() -> CallToolResult {
     CallToolResult::error(vec![Content::text(payload.to_string())])
 }
 
-/// `slow_tool`: sleep `delay_ms` milliseconds, then return. A stub that returns
-/// instantly fails the test's lower-bound assertion on wall-clock elapsed time.
-///
-/// Uses `tokio::time::sleep` (not `std::thread::sleep`) so the runtime worker is
-/// yielded back to the scheduler for the duration — the probe runs on a
-/// multi-threaded tokio runtime, but blocking a worker on a fixture is still
-/// the wrong default (rust-general: don't block the executor).
+/// `slow_tool`: sleep `delay_ms` milliseconds, then return.
 async fn slow_tool(arguments: Option<serde_json::Value>) -> CallToolResult {
     let delay_ms = arguments
         .as_ref()
@@ -267,29 +252,29 @@ async fn slow_tool(arguments: Option<serde_json::Value>) -> CallToolResult {
 /// `dangerous_noop`: harmless no-op. The destructive advertisement lives on the
 /// tool definition (`dangerous_noop_tool`), not the call result.
 fn dangerous_noop() -> CallToolResult {
-    CallToolResult::success(vec![Content::text("dangerous_noop: no-op completed".to_string())])
+    CallToolResult::success(vec![Content::text(
+        "dangerous_noop: no-op completed".to_string(),
+    )])
 }
 
 /// `needs_sampling`: send a `sampling/createMessage` request from the server
 /// role up to the client (D-008). The request is emitted on stdout as a
 /// JSON-RPC request with an id.
 ///
-/// Nothing in Phase 0 answers it (the aggregator has no reverse-traffic
-/// handler), so the probe must not block its `call_tool` future on the
-/// response — that would hang the whole server (GOTCHA #2). The send runs on a
-/// detached task that owns a clone of the peer; the handler returns a tool
-/// result immediately. The detached future may time out or error waiting for a
-/// response that never comes; that is expected and does not affect the test
-/// outcome (the test observes the outbound request and force-kills the child).
+/// Nothing in Phase 0 answers it, so the probe must not block its `call_tool`
+/// future on the response — that would hang the whole server (GOTCHA #2).
 fn needs_sampling(context: RequestContext<RoleServer>) -> CallToolResult {
     let peer = context.peer.clone();
     let request = build_sampling_request();
     tokio::spawn(async move {
-        // The result is intentionally ignored: Phase 0 has no responder, so this
-        // future is expected to error or time out. The load-bearing side effect
-        // — the outbound JSON-RPC request on stdout — happens when send_request
-        // writes the request frame to the transport.
-        let _ = peer.send_request(request).await;
+        // The load-bearing side effect is the outbound JSON-RPC request on
+        // stdout. The unanswered response may time out or error.
+        if tokio::time::timeout(SAMPLING_REQUEST_TIMEOUT, peer.send_request(request))
+            .await
+            .is_err()
+        {
+            tracing::warn!("probe-server sampling/createMessage request timed out");
+        }
     });
     CallToolResult::success(vec![Content::text(
         "needs_sampling: sent sampling/createMessage request to client".to_string(),
@@ -298,10 +283,7 @@ fn needs_sampling(context: RequestContext<RoleServer>) -> CallToolResult {
 
 /// Build the `sampling/createMessage` request payload.
 ///
-/// The content and token budget are minimal — the only contract the test
-/// asserts on is `method == "sampling/createMessage"`, an `id`, and the
-/// presence of `params`. A minimal user-text message + a small max_tokens
-/// satisfies the rmcp validator.
+/// Minimal payload that satisfies the rmcp validator.
 fn build_sampling_request() -> ServerRequest {
     let messages = vec![SamplingMessage::user_text(
         "probe needs_sampling: please sample this message.",
@@ -312,13 +294,10 @@ fn build_sampling_request() -> ServerRequest {
 
 /// Structured unknown-tool result — never a JSON-RPC error (D-005).
 fn unknown_tool_result(tool: String) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(format!(
-        "unknown probe tool: {tool}"
-    ))])
+    CallToolResult::error(vec![Content::text(format!("unknown probe tool: {tool}"))])
 }
 
-/// Entry point. Initializes tracing to stderr (GOTCHA #1) and serves the probe
-/// over stdio. The probe has no CLI surface — it is a fixture, not a product.
+/// Entry point. Initializes tracing to stderr (GOTCHA #1) and serves over stdio.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     init_tracing();

@@ -16,6 +16,6 @@
 mod common;
 
 mod aggregator;
-mod probe;
-mod pinning;
 mod manual_e2e;
+mod pinning;
+mod probe;

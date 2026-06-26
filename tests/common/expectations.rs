@@ -9,7 +9,8 @@
 /// Exact descriptions from master.md §Required Pattern. Changing these is a
 /// SemVer-major break (ARCHITECTURE.md §Versioning).
 pub const LIST_TOOLS_DESC: &str = "Lists the tools available through this aggregator, grouped by server, with one-line descriptions. Call this once to see what's connected; pass server to fetch a single server's tools.";
-pub const GET_TOOL_SCHEMA_DESC: &str = "Get the full input schema for a tool. Format: server__tool (e.g. postgres__query).";
+pub const GET_TOOL_SCHEMA_DESC: &str =
+    "Get the full input schema for a tool. Format: server__tool (e.g. postgres__query).";
 pub const INVOKE_TOOL_DESC: &str = "Call a tool by server__tool name with arguments.";
 
 /// The exact, ordered set of meta-tool names the aggregator exposes.
@@ -17,7 +18,9 @@ pub const META_TOOL_NAMES: [&str; 3] = ["list_tools", "get_tool_schema", "invoke
 
 /// Look up a tool definition in a tools/list result by name.
 pub fn find_tool<'a>(tools: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
-    tools.iter().find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+    tools
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
 }
 
 /// Assert the three meta-tools are present exactly, by name, in any order.
@@ -58,7 +61,8 @@ pub fn assert_desc(tool: &serde_json::Value, expected: &str) {
         .as_str()
         .unwrap_or_else(|| panic!("tool description is not a string: {desc}"));
     assert_eq!(
-        got, expected,
+        got,
+        expected,
         "tool `{}` description mismatch",
         tool_name(tool)
     );

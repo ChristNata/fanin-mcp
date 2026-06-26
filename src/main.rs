@@ -1,10 +1,4 @@
-//! fanin-mcp — a standalone, stdio-native MCP proxy that federates many
-//! upstream MCP servers behind a single endpoint.
-//!
-//! P0.2 ships the real CLI (`serve` default + `cred` stubs + global
-//! `--namespace` / `--config`) and the stdio `serve(stdio())` loop. The
-//! three static meta-tools and the not-implemented `call_tool` live in
-//! [`server`].
+//! fanin-mcp — the stdio-native MCP proxy entry point.
 //!
 //! GOTCHA #1: stdout is the MCP transport once `serve(stdio())` runs. No
 //! `println!` / `print!` / `dbg!` exists in this crate. Tracing is initialized
@@ -30,8 +24,7 @@ use rmcp::ServiceExt;
 use crate::config::CliConfig;
 use crate::server::Aggregator;
 
-/// The top-level CLI. `serve` is the default command path; `cred` is a
-/// subcommand stub surface that later phases fill with keyring calls.
+/// The top-level CLI.
 #[derive(Debug, Parser)]
 #[command(
     name = "fanin-mcp",
@@ -40,15 +33,11 @@ use crate::server::Aggregator;
     long_about = None,
 )]
 struct Cli {
-    /// The selected namespace for this session. Empty means "no namespace
-    /// filter". Phase 0 carries the value; namespace ACL enforcement is a
-    /// later phase (D-006: annotations are conservative, not a security
-    /// boundary).
+    /// The selected namespace for this session.
     #[arg(long, global = true)]
     namespace: Option<String>,
 
-    /// Path to the server config file. Phase 0 carries the value; config
-    /// parsing and validation arrive in Phase 1.
+    /// Path to the server config file.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -56,14 +45,14 @@ struct Cli {
     command: Option<Command>,
 }
 
-/// The subcommand surface. `serve` is the default; `cred` is a stub.
+/// The subcommand surface.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Serve the aggregator over stdio (default when no subcommand is given).
     Serve,
 
-    /// Credential management — stubs in Phase 0. Never touch keyring or
-    /// secrets here yet (D-010, GOTCHA #18/#19/#22).
+    /// Credential management stub. Never touch keyring or secrets here yet
+    /// (D-010, GOTCHA #18/#19/#22).
     Cred {
         #[command(subcommand)]
         action: CredAction,
@@ -73,12 +62,11 @@ enum Command {
 /// `cred` subcommand surface (stubs).
 #[derive(Debug, Subcommand)]
 enum CredAction {
-    /// Store a secret for an upstream. STUB in Phase 0 — does not read the
-        /// keyring or prompt. Implemented in a later phase.
+    /// Store a secret for an upstream. Stub only.
     Set,
-    /// List stored credential names only (never values). STUB in Phase 0.
+    /// List stored credential names only. Stub only.
     List,
-    /// Remove a stored secret. STUB in Phase 0.
+    /// Remove a stored secret. Stub only.
     Rm,
 }
 
@@ -97,9 +85,7 @@ async fn main() -> ExitCode {
 
 /// Run the stdio MCP server.
 ///
-/// Initializes the [`Aggregator`] with the CLI config and drives the rmcp
-/// stdio transport. `serve(stdio())` hands the JSON-RPC stream; `.waiting()`
-/// blocks until the client disconnects. Errors go to stderr via `tracing`.
+/// Errors go to stderr via `tracing`.
 async fn run_serve(config: CliConfig) -> ExitCode {
     let aggregator = Aggregator::new(config);
 
@@ -125,10 +111,7 @@ async fn run_serve(config: CliConfig) -> ExitCode {
 
 /// Run a `cred` subcommand stub.
 ///
-/// Phase 0 does not implement credential storage. The stubs print a
-/// not-implemented notice to **stderr** (never stdout — GOTCHA #1) and return
-/// a failure exit so a caller relying on `cred` fails fast rather than
-/// silently no-op'ing.
+/// Emits a not-implemented warning to **stderr** and fails fast.
 fn run_cred(action: CredAction) -> ExitCode {
     let name = match action {
         CredAction::Set => "cred set",
@@ -145,15 +128,7 @@ fn run_cred(action: CredAction) -> ExitCode {
 
 /// Initialize `tracing` with a stderr writer.
 ///
-/// Everything — the serve path, rmcp internals, diagnostics — writes to
-/// stderr so the JSON-RPC stream on stdout stays clean (GOTCHA #1). The
-/// subscriber is installed before any serve logic runs.
-///
-/// Note: `EnvFilter` is gated behind the `env-filter` feature of
-/// `tracing-subscriber`, which the frozen `Cargo.toml` does not enable. We
-/// use the static `LevelFilter` instead — good enough for Phase 0
-/// diagnostics. A later phase can add the feature and switch to env-driven
-/// filtering.
+/// The subscriber is installed before any serve logic runs.
 fn init_tracing() {
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::fmt;

@@ -23,13 +23,12 @@ autotests = false
 # D-015: pinned EXACTLY with `=x.y.z`; `Cargo.lock` is committed. The rmcp
 # API moves fast; the pin prevents implementers from fighting the compiler
 # with stale signatures. Features: `server` + `client` (dual role),
-# `macros` (the `#[tool]` attribute macro), `transport-io` (server-side
-# stdio), `transport-child-process` (client-side stdio over a spawned
-# child — used in later phases to connect to upstreams).
+# `transport-io` (server-side stdio), `transport-child-process`
+# (client-side stdio over a spawned child — used in later phases to connect
+# to upstreams).
 rmcp = { version = "=1.8.0", default-features = false, features = [
     "server",
     "client",
-    "macros",
     "transport-io",
     "transport-child-process",
 ] }

@@ -1,10 +1,4 @@
-//! Downstream MCP server surface — the [`ServerHandler`] skeleton, the three
-//! static meta-tools, and the `call_tool` not-implemented stub.
-//!
-//! P0.2 implements the real downstream surface against the pinned rmcp
-//! (1.8.0) API. There is no upstream registry in Phase 0: `list_tools` is
-//! fully static and `call_tool` returns a structured not-implemented
-//! `CallToolResult { isError: true }` for every name (D-005, GOTCHA #3).
+//! Downstream MCP server surface.
 //!
 //! GOTCHA #1: stdout is the MCP transport. Nothing in this module writes to
 //! stdout; all diagnostics go to stderr via `tracing`.
@@ -17,9 +11,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
-    JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-    ToolAnnotations,
+    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
@@ -27,8 +20,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use crate::config::CliConfig;
 use crate::error::ToolError;
 
-/// Server name advertised to clients (D-017, master criterion: server must
-/// name itself `fanin-mcp`).
+/// Server name advertised to clients.
 const SERVER_NAME: &str = "fanin-mcp";
 
 /// The static meta-tool descriptions — final design, verbatim from
@@ -40,14 +32,9 @@ const GET_TOOL_SCHEMA_DESC: &str =
 const INVOKE_TOOL_DESC: &str = "Call a tool by server__tool name with arguments.";
 
 /// The downstream aggregator server.
-///
-/// Phase 0 carries the CLI configuration but does not act on it — there is no
-/// registry, no namespace enforcement, and no upstream work. Every
-/// `call_tool` returns a structured not-implemented result.
 #[derive(Debug, Clone)]
 pub struct Aggregator {
-    /// Carried verbatim from `--namespace` / `--config`. Phase 0 does not use
-    /// these; they exist so the CLI shape is fixed for later phases.
+    /// Carried verbatim from `--namespace` / `--config` for later phases.
     config: CliConfig,
 }
 
@@ -58,14 +45,8 @@ impl Aggregator {
     }
 
     /// Build the three static meta-tools.
-    ///
-    /// `list_tools` and `get_tool_schema` take no conservative annotations
-    /// (they are read-only discovery). `invoke_tool` carries the D-006
-    /// conservative hints: `destructiveHint=true`, `readOnlyHint=false`,
-    /// `openWorldHint=true` — so CC prompts rather than auto-allows.
     fn meta_tools(&self) -> Vec<Tool> {
-        // The namespace is carried so the CLI shape is fixed; Phase 0 does not
-        // filter. The binding keeps `self.config` live without a per-tool cost.
+        // The binding keeps carried CLI config live without per-tool cost.
         let _ = &self.config;
 
         vec![
@@ -77,9 +58,7 @@ impl Aggregator {
 }
 
 impl ServerHandler for Aggregator {
-    /// Advertise the server name/version and the `tools` capability so clients
-    /// can call `tools/list` (GOTCHA #8). No upstream work happens here —
-    /// Phase 0 ships no registry, so `initialize` is lazy by construction.
+    /// Advertise server info and the `tools` capability (GOTCHA #8).
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
         InitializeResult::new(capabilities)
@@ -89,9 +68,8 @@ impl ServerHandler for Aggregator {
     /// Return exactly the three meta-tools with the final static descriptions.
     ///
     /// No upstream fan-out: `tools/list` is fully static (D-002, D-003,
-    /// GOTCHA #7). A client sends `tools/list` at every session start; any
-    /// upstream touch here would destroy lazy loading and the <500ms init
-    /// budget. The namespace is carried but not enforced in Phase 0.
+    /// GOTCHA #7). A client sends it at every session start; any upstream touch
+    /// here would destroy lazy loading and the <500ms init budget.
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -102,10 +80,8 @@ impl ServerHandler for Aggregator {
 
     /// Return a structured not-implemented `CallToolResult` for any tool name.
     ///
-    /// Phase 0 does not proxy. Every meta-tool AND every unknown name returns
-    /// `Ok(CallToolResult::error(...))` — a tool-level result with
-    /// `isError: true`, never a JSON-RPC error (D-005, GOTCHA #3). The content
-    /// is a text block the LLM can reason about. No panic, no hang.
+    /// Returns `Ok(CallToolResult::error(...))` — a tool-level result with
+    /// `isError: true`, never a JSON-RPC error (D-005, GOTCHA #3).
     fn call_tool(
         &self,
         request: CallToolRequestParams,

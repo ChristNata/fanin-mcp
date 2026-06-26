@@ -28,7 +28,10 @@ fn cargo_toml_pins_rmcp_exactly_and_lockfile_exists() {
     let cargo_lock = root.join("Cargo.lock");
 
     let toml_text = std::fs::read_to_string(&cargo_toml).unwrap_or_else(|e| {
-        panic!("Cargo.toml must exist at {} (P0.1 produces it): {e}", cargo_toml.display())
+        panic!(
+            "Cargo.toml must exist at {} (P0.1 produces it): {e}",
+            cargo_toml.display()
+        )
     });
     assert!(
         cargo_lock.exists(),
@@ -105,7 +108,12 @@ fn has_quoted_exact_version(value: &str) -> bool {
                 // pin a specific version here — the implementer chooses and
                 // commits the lockfile; we only assert the *form* is exact.
                 if let Some(rest) = lit.strip_prefix('=') {
-                    if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    if rest
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
+                    {
                         return true;
                     }
                 }

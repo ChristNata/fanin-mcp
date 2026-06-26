@@ -26,7 +26,9 @@ const PROBE_TOOL_NAMES: [&str; 5] = [
 ];
 
 fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
-    tools.iter().find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+    tools
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
 }
 
 /// Criterion 6 (Probe build/run gate): the probe fixture builds and runs
@@ -137,7 +139,9 @@ async fn probe_echo_ok_returns_supplied_input() {
         .iter()
         .filter_map(|b| {
             if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                b.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -277,20 +281,17 @@ async fn probe_needs_sampling_sends_sampling_create_message_on_wire() {
     // `sampling/createMessage`; a response has an `id` and a `result`/`error`;
     // a notification has no `id`.
     let deadline = Duration::from_secs(5);
-    let observed = timeout(
-        deadline,
-        async {
-            loop {
-                let msg = child.read_next_message().await;
-                let method = msg.get("method").and_then(|m| m.as_str());
-                let has_id = msg.get("id").is_some();
-                if method == Some("sampling/createMessage") && has_id {
-                    return msg;
-                }
-                // Keep scanning — tools/call responses, notifications, etc.
+    let observed = timeout(deadline, async {
+        loop {
+            let msg = child.read_next_message().await;
+            let method = msg.get("method").and_then(|m| m.as_str());
+            let has_id = msg.get("id").is_some();
+            if method == Some("sampling/createMessage") && has_id {
+                return msg;
             }
-        },
-    )
+            // Keep scanning — tools/call responses, notifications, etc.
+        }
+    })
     .await;
 
     assert!(
@@ -335,7 +336,9 @@ async fn probe_all_five_tools_reachable_over_stdio() {
         let resp = common::call_tool(&mut child, name, args).await;
         common::assert_no_rpc_error(
             &resp,
-            &format!("probe {name} must be reachable and return a tool result, not a JSON-RPC error"),
+            &format!(
+                "probe {name} must be reachable and return a tool result, not a JSON-RPC error"
+            ),
         );
         let result = resp
             .get("result")

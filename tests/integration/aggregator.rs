@@ -122,15 +122,12 @@ async fn initialize_returns_under_500ms_and_no_upstream_connections() {
     let mut child = common::spawn_bin("fanin-mcp").await;
 
     let started = Instant::now();
-    let init = timeout(
-        Duration::from_secs(1),
-        common::initialize(&mut child),
-    )
-    .await
-    .expect("initialize did not return within 1s ceiling")
-    .get("serverInfo")
-    .cloned()
-    .unwrap_or_else(|| panic!("initialize result must carry serverInfo"));
+    let init = timeout(Duration::from_secs(1), common::initialize(&mut child))
+        .await
+        .expect("initialize did not return within 1s ceiling")
+        .get("serverInfo")
+        .cloned()
+        .unwrap_or_else(|| panic!("initialize result must carry serverInfo"));
     let elapsed = started.elapsed();
 
     assert!(
@@ -181,7 +178,10 @@ async fn calling_each_meta_tool_returns_structured_not_implemented() {
     // caught by RPC_DEADLINE inside request().
     let cases: [(&str, Value); 3] = [
         ("list_tools", serde_json::json!({})),
-        ("get_tool_schema", serde_json::json!({ "name": "postgres__query" })),
+        (
+            "get_tool_schema",
+            serde_json::json!({ "name": "postgres__query" }),
+        ),
         (
             "invoke_tool",
             serde_json::json!({ "name": "postgres__query", "arguments": {} }),
@@ -200,13 +200,17 @@ async fn calling_each_meta_tool_returns_structured_not_implemented() {
             .unwrap_or_else(|| panic!("tools/call {name} returned no result field"));
         common::assert_is_error_result(&result, &format!("tools/call {name}"));
 
-        // The not-implemented content must be readable structured JSON so the
-        // LLM can reason about it (D-005). Assert at least one text block
-        // exists; the exact wording is not part of the public contract but
-        // the shape is.
+        // The not-implemented content must carry a text content block so the
+        // LLM can reason about it (D-005: errors stay in the conversation).
+        // Phase 0 asserts isError:true plus a content block; the full D-005
+        // structured JSON error model (server/tool/code/message/recoverable
+        // shape) is deferred to Phase 4 Error Hardening. The exact wording is
+        // not part of the public contract; only the block's presence is.
         let content = result.get("content").and_then(|c| c.as_array()).unwrap();
         assert!(
-            content.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")),
+            content
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")),
             "tools/call {name} not-implemented result must carry a text content block"
         );
     }
@@ -223,12 +227,7 @@ async fn calling_unknown_tool_returns_structured_result_not_rpc_error() {
     let mut child = common::spawn_bin("fanin-mcp").await;
     common::initialize(&mut child).await;
 
-    let resp = common::call_tool(
-        &mut child,
-        "does_not_exist",
-        serde_json::json!({}),
-    )
-    .await;
+    let resp = common::call_tool(&mut child, "does_not_exist", serde_json::json!({})).await;
     // The key assertion: tool-level failures stay in the conversation, never
     // surface as JSON-RPC errors (D-005, GOTCHA #3).
     common::assert_no_rpc_error(&resp, "unknown tool call");
