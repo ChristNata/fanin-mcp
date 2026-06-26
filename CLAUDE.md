@@ -85,6 +85,24 @@ These are the sharp edges that bite first. The full set lives in `docs/GOTCHA.md
 8. **Tests are a read-only contract.** Only `test-creator` writes them. 100% pass,
    no thresholds.
 
+## Versioning — commit/push stamp
+
+Every commit and push message in this repo leads with a version stamp of the
+form **`vA.B.C`** — a literal `v` prefix and **exactly three** numbers. So
+`v0.1.5`, never `0.1.0.5`, never without the `v`.
+
+- **A** — major / launch stage: `0` pre-launch, `1` launched.
+- **B** — phase: **MVP phase number + 1** (the MVP "Phase 0" skeleton is `1`;
+  MVP "Phase 1" config+upstream is `2`; each subsequent phase +1).
+- **C** — checkpoint within the phase, starting at `1`, resetting each phase.
+
+Format: `vA.B.C - <summary>` (keep the `Co-Authored-By` trailer).
+Examples: Phase 0 stages → `v0.1.1`…`v0.1.5`; Phase 1 → `v0.2.1`, `v0.2.2`, …
+
+**This overrides** the global `capital-style` `A.B.C.D` / no-`v` stamp — that
+format is wrong for this project. (Phase 0 landed mistakenly as `0.1.0.1`…
+`0.1.0.5`, already on `main`; left as-is. The convention applies from `v0.2.x`.)
+
 ## Project skill
 
 - **`rmcp-general`** (`.claude/skills/rmcp-general/SKILL.md`) — rmcp idioms,
