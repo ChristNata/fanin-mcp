@@ -19,6 +19,8 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 
 use crate::config::CliConfig;
 use crate::error::ToolError;
+use crate::namespace::ActiveNamespace;
+use crate::registry::Registry;
 
 /// Server name advertised to clients.
 const SERVER_NAME: &str = "fanin-mcp";
@@ -36,12 +38,31 @@ const INVOKE_TOOL_DESC: &str = "Call a tool by server__tool name with arguments.
 pub struct Aggregator {
     /// Carried verbatim from `--namespace` / `--config` for later phases.
     config: CliConfig,
+    registry: Option<Arc<Registry>>,
+    namespace: Option<ActiveNamespace>,
 }
 
 impl Aggregator {
     /// Build a new aggregator from the resolved CLI configuration.
     pub fn new(config: CliConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            registry: None,
+            namespace: None,
+        }
+    }
+
+    /// Build a new aggregator with a live upstream registry.
+    pub fn with_registry(
+        config: CliConfig,
+        registry: Arc<Registry>,
+        namespace: ActiveNamespace,
+    ) -> Self {
+        Self {
+            config,
+            registry: Some(registry),
+            namespace: Some(namespace),
+        }
     }
 
     /// Build the three static meta-tools.
@@ -87,9 +108,140 @@ impl ServerHandler for Aggregator {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + MaybeSendFuture + '_ {
-        let tool = request.name.to_string();
-        std::future::ready(Ok(not_implemented_result(tool)))
+        async move { Ok(self.dispatch_tool(request).await) }
     }
+}
+
+impl Aggregator {
+    async fn dispatch_tool(&self, request: CallToolRequestParams) -> CallToolResult {
+        match request.name.as_ref() {
+            "list_tools" => self.handle_list_tools(request.arguments).await,
+            "get_tool_schema" => self.handle_get_tool_schema(request.arguments).await,
+            "invoke_tool" => self.handle_invoke_tool(request.arguments).await,
+            other => not_implemented_result(other.to_string()),
+        }
+    }
+
+    async fn handle_list_tools(&self, arguments: Option<JsonObject>) -> CallToolResult {
+        let Some(registry) = &self.registry else {
+            return ToolError::NotImplemented { tool: "list_tools".to_string() }.as_result();
+        };
+        let Some(namespace) = &self.namespace else {
+            return ToolError::NotImplemented { tool: "list_tools".to_string() }.as_result();
+        };
+
+        let servers = if let Some(server) = arguments
+            .as_ref()
+            .and_then(|a| a.get("server"))
+            .and_then(|v| v.as_str())
+        {
+            if !registry.has_server(server) {
+                return ToolError::UnknownServer { server: server.to_string() }.as_result();
+            }
+            if !namespace.is_server_allowed(server) {
+                return ToolError::NamespaceDenied { server: server.to_string(), tool: None }.as_result();
+            }
+            vec![server.to_string()]
+        } else {
+            namespace.allowed_servers()
+        };
+
+        let mut rows = Vec::new();
+        for server in servers {
+            if !registry.has_server(&server) {
+                return ToolError::UnknownServer { server }.as_result();
+            }
+            let tools = match registry.inventory(&server).await {
+                Ok(tools) => tools,
+                Err(e) => return e.as_result(),
+            };
+            for tool in tools {
+                rows.push(serde_json::json!({
+                    "server": server,
+                    "tool": tool.name,
+                    "name": tool.name,
+                    "description": tool.description.unwrap_or_default(),
+                }));
+            }
+        }
+
+        CallToolResult::success(vec![Content::text(serde_json::Value::Array(rows).to_string())])
+    }
+
+    async fn handle_get_tool_schema(&self, arguments: Option<JsonObject>) -> CallToolResult {
+        let Some(name) = arguments
+            .as_ref()
+            .and_then(|a| a.get("name"))
+            .and_then(|v| v.as_str())
+        else {
+            return ToolError::InvalidRequest { tool: "get_tool_schema".to_string(), message: "missing string `name`".to_string() }.as_result();
+        };
+        let (server, tool) = match parse_server_tool(name) {
+            Some(parts) => parts,
+            None => return ToolError::InvalidRequest { tool: "get_tool_schema".to_string(), message: "name must have format server__tool".to_string() }.as_result(),
+        };
+        let Some(registry) = &self.registry else {
+            return ToolError::NotImplemented { tool: "get_tool_schema".to_string() }.as_result();
+        };
+        let Some(namespace) = &self.namespace else {
+            return ToolError::NotImplemented { tool: "get_tool_schema".to_string() }.as_result();
+        };
+        if !registry.has_server(server) {
+            return ToolError::UnknownServer { server: server.to_string() }.as_result();
+        }
+        if !namespace.is_tool_allowed(server, tool) {
+            return ToolError::NamespaceDenied { server: server.to_string(), tool: Some(tool.to_string()) }.as_result();
+        }
+        let tools = match registry.inventory(server).await {
+            Ok(tools) => tools,
+            Err(e) => return e.as_result(),
+        };
+        let Some(found) = tools.into_iter().find(|t| t.name.as_ref() == tool) else {
+            return ToolError::UnknownTool { server: server.to_string(), tool: tool.to_string() }.as_result();
+        };
+        CallToolResult::success(vec![Content::text(serde_json::Value::Object((*found.input_schema).clone()).to_string())])
+    }
+
+    async fn handle_invoke_tool(&self, arguments: Option<JsonObject>) -> CallToolResult {
+        let Some(args) = arguments else {
+            return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "missing arguments object".to_string() }.as_result();
+        };
+        let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+            return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "missing string `name`".to_string() }.as_result();
+        };
+        let (server, tool) = match parse_server_tool(name) {
+            Some(parts) => parts,
+            None => return ToolError::InvalidRequest { tool: "invoke_tool".to_string(), message: "name must have format server__tool".to_string() }.as_result(),
+        };
+        let Some(registry) = &self.registry else {
+            return ToolError::NotImplemented { tool: "invoke_tool".to_string() }.as_result();
+        };
+        let Some(namespace) = &self.namespace else {
+            return ToolError::NotImplemented { tool: "invoke_tool".to_string() }.as_result();
+        };
+        if !registry.has_server(server) {
+            return ToolError::UnknownServer { server: server.to_string() }.as_result();
+        }
+        if !namespace.is_tool_allowed(server, tool) {
+            return ToolError::NamespaceDenied { server: server.to_string(), tool: Some(tool.to_string()) }.as_result();
+        }
+        let raw_arguments = args
+            .get("arguments")
+            .and_then(|v| v.as_object())
+            .cloned();
+        match registry.call_tool(server, tool, raw_arguments).await {
+            Ok(result) => result,
+            Err(e) => e.as_result(),
+        }
+    }
+}
+
+fn parse_server_tool(name: &str) -> Option<(&str, &str)> {
+    let (server, tool) = name.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((server, tool))
 }
 
 /// `list_tools` — optional `server` string filter.

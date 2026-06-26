@@ -16,12 +16,15 @@ mod server;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
 use rmcp::ServiceExt;
 
 use crate::config::CliConfig;
+use crate::namespace::ActiveNamespace;
+use crate::registry::Registry;
 use crate::server::Aggregator;
 
 /// The top-level CLI.
@@ -85,9 +88,42 @@ async fn main() -> ExitCode {
 
 /// Run the stdio MCP server.
 ///
-/// Errors go to stderr via `tracing`.
+/// Phase 1: load + validate the TOML config (when `--config` is given) BEFORE
+/// constructing or serving the aggregator. A validation failure is logged to
+/// stderr via `tracing` and returns `ExitCode::FAILURE` — it never reaches
+/// `serve(stdio())`, so no bytes are written to stdout (GOTCHA #1).
+///
+/// When `--config` is omitted, Phase 0 behavior is preserved: the aggregator
+/// serves the three static meta-tools with no upstream config. This keeps the
+/// Phase 0 aggregator tests (which spawn the binary with no flags) green.
+///
+/// All diagnostics go to stderr via `tracing`.
 async fn run_serve(config: CliConfig) -> ExitCode {
-    let aggregator = Aggregator::new(config);
+    // Load + validate the config BEFORE serving. A failure here must exit
+    // before `serve(stdio())` begins so the JSON-RPC stream is never corrupted
+    // (GOTCHA #1). The loaded config is not yet wired into the aggregator —
+    // registry/forward/invoke are later sub-phases; Phase 1 config sub-phase
+    // only needs startup validation to gate serving.
+    let loaded = if let Some(path) = config.config_path.as_ref() {
+        match crate::config::load_and_validate(path, &config.namespace) {
+            Ok(loaded) => Some(loaded),
+            Err(e) => {
+                tracing::error!(error = %e, "startup config validation failed");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
+    let aggregator = if let Some(loaded) = loaded {
+        let namespace = ActiveNamespace::new(&loaded, &config.namespace);
+        tracing::debug!(namespace = namespace.name(), "active namespace selected");
+        let registry = Arc::new(Registry::new(loaded));
+        Aggregator::with_registry(config, registry, namespace)
+    } else {
+        Aggregator::new(config)
+    };
 
     // `stdio()` returns `(tokio::io::Stdin, tokio::io::Stdout)`. Once the serve
     // future starts, stdout is the JSON-RPC transport — no further stdout

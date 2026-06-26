@@ -9,6 +9,7 @@
 //! (GOTCHA: needs_sampling has no responder in Phase 0). The `ChildGuard`
 //! kills the child on drop so no orphaned processes survive a failed test.
 
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -75,6 +76,11 @@ pub struct JsonRpcChild {
     stdout: BufReader<tokio::process::ChildStdout>,
     next_id: u64,
     _stderr: Option<tokio::process::ChildStderr>,
+    /// Buffer of responses received out of order. JSON-RPC permits responses
+    /// to arrive in any order, so when a concurrent test sends ids 2 and 3 and
+    /// the server returns 3 before 2, the 3 is retained here for a later
+    /// `wait_for_id(3)` rather than being dropped on the floor.
+    pending: HashMap<u64, Value>,
 }
 
 impl JsonRpcChild {
@@ -106,10 +112,14 @@ impl JsonRpcChild {
         id
     }
 
-    /// Wait for a JSON-RPC response matching the given id, discarding
-    /// notifications and out-of-band messages until it arrives. Fails on
-    /// hang (RPC_DEADLINE).
+    /// Wait for a JSON-RPC response matching the given id. Out-of-order
+    /// responses for other in-flight requests are buffered in `self.pending`
+    /// and returned by a later `wait_for_id` call — they are NOT dropped.
+    /// Notifications (no `id`) are skipped. Fails on hang (RPC_DEADLINE).
     pub async fn wait_for_id(&mut self, id: u64) -> Value {
+        if let Some(msg) = self.pending.remove(&id) {
+            return msg;
+        }
         loop {
             let raw = self
                 .read_line()
@@ -120,10 +130,17 @@ impl JsonRpcChild {
             }
             let msg: Value = serde_json::from_str(&raw)
                 .unwrap_or_else(|e| panic!("response not JSON: {raw}\n{e}"));
-            if msg.get("id") == Some(&Value::from(id)) {
-                return msg;
+            // A message with a numeric `id` is a response. If it matches, return
+            // it; otherwise it is a response for a different in-flight request,
+            // so retain it for a later `wait_for_id(that_id)`.
+            if let Some(other) = msg.get("id").and_then(Value::as_u64) {
+                if other == id {
+                    return msg;
+                }
+                self.pending.insert(other, msg);
+                continue;
             }
-            // Notifications or out-of-band messages: keep waiting for the match.
+            // Notifications (no `id`) or non-numeric ids: skip as before.
         }
     }
 
@@ -260,6 +277,7 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
         stdout: BufReader::new(stdout),
         next_id: 1,
         _stderr: Some(stderr),
+        pending: HashMap::new(),
     }
 }
 
@@ -316,6 +334,7 @@ pub async fn spawn_fanin_with_args(args: &[String]) -> JsonRpcChild {
         stdout: BufReader::new(stdout),
         next_id: 1,
         _stderr: Some(stderr),
+        pending: HashMap::new(),
     }
 }
 

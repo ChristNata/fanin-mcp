@@ -422,33 +422,150 @@ async fn child_stderr_lands_in_log_sink_with_server_prefix() {
 /// an EMPTY list response, not a hang and not an error. The aggregator's
 /// `ClientHandler::list_roots` returns `ListRootsResult` with zero roots.
 ///
-/// The probe fixture does not currently send a `roots/list` request on its
-/// own (no tool triggers it). Directly observing this requires either a
-/// probe-fixture tool that calls `roots/list`, or a unit test against the
-/// handler. This test is therefore deferred — see `tests.md` §Deferred. The
-/// `needs_sampling` rejection (above) is the proxy proof that the
-/// `ClientHandler` is wired at all; `roots/list` specifically needs a fixture
-/// update.
+/// The probe fixture's `needs_roots` tool sends an upstream-originated
+/// `roots/list` request toward the aggregator (mirrors `needs_sampling`).
+/// The aggregator's `ClientHandler::list_roots` answers with an empty list,
+/// so the probe's `call_tool` resolves instead of hanging. This is wired
+/// (no longer deferred) now that the probe-fixture `needs_roots` tool exists.
 #[tokio::test]
 async fn upstream_roots_list_receives_empty_list() {
-    let child = phase1_child().await;
-    // Placeholder: the assertion is "an upstream roots/list request gets an
-    // empty list response." Without a probe tool that sends roots/list, this
-    // cannot be observed over stdio. Kept as a deferred contract marker.
-    let _ = child;
-    panic!("deferred — re-enable after probe-fixture roots/list tool lands");
+    let mut child = phase1_child().await;
+
+    let resp = timeout(
+        REVERSE_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            serde_json::json!({
+                "name": "probe__needs_roots",
+                "arguments": {},
+            }),
+        ),
+    )
+    .await
+    .expect(
+        "needs_roots call must complete within {REVERSE_DEADLINE:?} — the \
+         aggregator must answer the probe's roots/list request with an empty \
+         list, not hang (GOTCHA #2)",
+    );
+
+    // The call must not surface as a JSON-RPC error (D-005).
+    common::assert_no_rpc_error(&resp, "invoke_tool probe__needs_roots");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_roots returned no result field"));
+
+    // The probe returns a SUCCESS text block ("needs_roots: sent roots/list
+    // request to client") once its detached send future is spawned. The
+    // aggregator must forward that result byte-faithfully. A Phase 0 stub
+    // returns a not-implemented ERROR (isError: true) without forwarding — so
+    // asserting SUCCESS here makes the test fail RED against the stub and pass
+    // GREEN once real forwarding + the roots/list empty-list handler land.
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "needs_roots must forward the probe's success result, not a \
+             not-implemented error (isError must not be true)"
+        );
+    }
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("needs_roots result missing content array"))
+        .iter()
+        .filter_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains("roots/list") || text.contains("needs_roots"),
+        "needs_roots must forward the probe's success text (the probe \
+         confirms it sent the roots/list request); got: {text:?}"
+    );
+
+    child.into_guard().shutdown().await.ok();
 }
 
 /// Master criterion 16 / P2.SC4: an upstream elicitation request receives a
 /// bounded rejection, not a hang. The aggregator's
 /// `ClientHandler::create_elicitation` rejects immediately.
 ///
-/// The probe fixture has no tool that sends an elicitation request (only
-/// `needs_sampling`, which sends sampling). This test is deferred until a
-/// probe-fixture `needs_elicitation` tool is added — see `tests.md` §Deferred.
+/// The probe fixture's `needs_elicitation` tool sends an upstream-originated
+/// `elicitation/create` request toward the aggregator (mirrors
+/// `needs_sampling`). The aggregator's `ClientHandler::create_elicitation`
+/// rejects it, so the probe's `call_tool` resolves instead of hanging. This
+/// is wired (no longer deferred) now that the probe-fixture
+/// `needs_elicitation` tool exists.
 #[tokio::test]
 async fn upstream_elicitation_request_receives_bounded_rejection() {
-    let child = phase1_child().await;
-    let _ = child;
-    panic!("deferred — re-enable after probe-fixture elicitation tool lands");
+    let mut child = phase1_child().await;
+
+    let resp = timeout(
+        REVERSE_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            serde_json::json!({
+                "name": "probe__needs_elicitation",
+                "arguments": {},
+            }),
+        ),
+    )
+    .await
+    .expect(
+        "needs_elicitation call must complete within {REVERSE_DEADLINE:?} — \
+         the aggregator must reject the probe's elicitation request, not hang \
+         (GOTCHA #2)",
+    );
+
+    // The call must not surface as a JSON-RPC error (D-005).
+    common::assert_no_rpc_error(&resp, "invoke_tool probe__needs_elicitation");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_elicitation returned no result field"));
+
+    // The probe returns a SUCCESS text block ("needs_elicitation: sent
+    // elicitation/create request to client") once its detached send future is
+    // spawned. The aggregator must forward that result byte-faithfully. A
+    // Phase 0 stub returns a not-implemented ERROR (isError: true) without
+    // forwarding — so asserting SUCCESS here makes the test fail RED against
+    // the stub and pass GREEN once real forwarding + the elicitation-reject
+    // handler land.
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "needs_elicitation must forward the probe's success result, not a \
+             not-implemented error (isError must not be true)"
+        );
+    }
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("needs_elicitation result missing content array"))
+        .iter()
+        .filter_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains("elicitation") || text.contains("needs_elicitation"),
+        "needs_elicitation must forward the probe's success text (the probe \
+         confirms it sent the elicitation request); got: {text:?}"
+    );
+
+    child.into_guard().shutdown().await.ok();
 }

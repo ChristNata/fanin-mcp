@@ -41,6 +41,9 @@ tokio = { version = "1", features = ["full"] }
 # Serialization + CLI + diagnostics + schema generation.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# toml — the server config file format. serde-compatible; `from_str` parses
+# the Phase 1 TOML config (servers + namespaces) into the config model.
+toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

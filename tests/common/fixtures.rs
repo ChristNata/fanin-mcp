@@ -12,8 +12,17 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::NamedTempFile;
+
+/// Per-call counter appended to the log-file path so two concurrent tests in
+/// the same integration binary (which share one process id) never collide on
+/// the same log file. Without this, every test passing a `log_file` writes to
+/// the same path and clobbers each other under cargo's default parallel
+/// execution — `registry::downstream_tools_list_does_not_spawn_upstream` goes
+/// flaky seeing `[probe]` lines written by sibling tests.
+static LOG_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Resolve the probe-server binary path from the cargo-injected env var.
 ///
@@ -227,10 +236,16 @@ fn escape_literal(s: &str) -> String {
 /// opens it for appending). On Windows a file can be opened by one writer
 /// while another reads, so this is safe.
 pub fn empty_log_file_path() -> String {
+    // Two concurrent tests in the same integration binary share the same
+    // `std::process::id()`, so the pid alone is not unique. Append a
+    // monotonically increasing per-call counter so every call returns a
+    // distinct path — no clobbering under parallel execution.
+    let seq = LOG_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut dir = std::env::temp_dir();
     dir.push(format!(
-        "fanin-mcp-phase1-log-{}.log",
-        std::process::id()
+        "fanin-mcp-phase1-log-{}-{}.log",
+        std::process::id(),
+        seq
     ));
     // Create / truncate so a stale file from a previous run does not pollute
     // the assertions.
