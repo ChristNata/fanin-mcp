@@ -29,12 +29,7 @@ impl ActiveNamespace {
         let (servers, tools) = config
             .namespaces
             .get(&name)
-            .map(|ns| {
-                let sv: HashSet<String> = ns.servers.iter().cloned().collect();
-                // Clone the tools map as-is; absent key means "all visible".
-                let tl: HashMap<String, Vec<String>> = ns.tools.clone();
-                (sv, tl)
-            })
+            .map(|ns| (ns.servers.iter().cloned().collect(), ns.tools.clone()))
             .unwrap_or_default();
         Self {
             name,
@@ -62,10 +57,9 @@ impl ActiveNamespace {
         if !self.is_server_allowed(server) {
             return false;
         }
-        match self.tools.get(server) {
-            None => true, // no filter entry => all tools on this allowed server
-            Some(list) => list.iter().any(|t| t == tool),
-        }
+        self.tools
+            .get(server)
+            .map_or(true, |list| list.iter().any(|t| t == tool))
     }
 
     /// Lists visible configured servers in deterministic order.
