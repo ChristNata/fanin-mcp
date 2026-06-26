@@ -24,3 +24,6 @@ Thumbs.db
 
 # Local logs (fanin-mcp writes only via --log-file, but guard ad-hoc runs)
 *.log
+
+# Covenant dispatch capture — post-mortem NDJSON, not a plan artifact
+docs/master-plans/**/dispatch-*.ndjson

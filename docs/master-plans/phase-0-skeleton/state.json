@@ -1,0 +1,14 @@
+{
+  "feature": "phase-0-skeleton",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "test",
+  "steps": {
+    "plan": { "status": "complete", "at": "2026-06-26T04:39:33Z" },
+    "test": { "status": "pending", "at": null },
+    "implement": { "status": "pending", "at": null },
+    "review": { "status": "pending", "at": null },
+    "simplify": { "status": "pending", "at": null }
+  }
+}
