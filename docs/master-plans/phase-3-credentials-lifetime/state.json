@@ -1,0 +1,29 @@
+{
+  "feature": "phase-3-credentials-lifetime",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "THOROUGH",
+  "current_step": "test-create",
+  "steps": {
+    "plan": {
+      "status": "complete",
+      "at": "2026-06-27T00:50:00Z"
+    },
+    "test-create": {
+      "status": "pending",
+      "at": null
+    },
+    "implement": {
+      "status": "pending",
+      "at": null
+    },
+    "simplify": {
+      "status": "pending",
+      "at": null
+    },
+    "review": {
+      "status": "pending",
+      "at": null
+    }
+  }
+}
