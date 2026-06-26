@@ -1,0 +1,20 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock is committed — fanin-mcp ships a binary (see STACK.md). Do not ignore.
+
+# Covenant orchestration
+.covenant-worktrees/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local logs (fanin-mcp writes only via --log-file, but guard ad-hoc runs)
+*.log

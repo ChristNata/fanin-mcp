@@ -1,0 +1,63 @@
+# Security Model — fanin-mcp
+
+This document states honestly what fanin-mcp protects against, what it cannot, and the practices enforced in the codebase. It exists because credential-handling tools that overclaim lose trust the first time someone reads the source.
+
+## Threat Model
+
+### What the OS keychain (and this design) protects against
+
+- **Plaintext secrets in config files.** `config.toml` contains only `${PLACEHOLDERS}`; it is safe to commit, share, and sync. Secrets live in DPAPI (Windows), Keychain (macOS), or Secret Service (Linux).
+- **Accidental git commits / dotfile leaks** of credentials.
+- **Disk theft / unencrypted backups** (keychain entries are encrypted at rest by the OS).
+- **Other users on the same machine** (keychain entries are per-user).
+- **Cross-server credential exposure.** Each upstream child process receives *only its own* resolved env vars. A compromised or malicious obsidian server never sees your database URL. This is strictly better than the common `.env`-file or shared-shell-environment status quo.
+
+### What it does NOT protect against
+
+- **Malware already running as your user.** On Windows and Linux, any same-user process can read your keychain entries; on macOS the prompt-gating is stronger but not absolute. No local secret store solves this — your browser's password manager has the same property. We will not pretend otherwise.
+- **A malicious upstream server you chose to configure.** Adding a server means running its code as you, with its own credentials. The aggregator limits the *blast radius* (per-server injection, namespace scoping) but cannot make untrusted code trustworthy.
+- **Prompt injection via upstream-provided text.** Tool names, descriptions, and results from upstreams are read by the LLM by design. The aggregator sanitizes and length-caps descriptions (strips newlines/control characters, caps each `list_tools` description row), which *bounds* this channel; it cannot eliminate it. Treat upstream servers with the same trust you'd give a dependency.
+
+## Enforced Practices (codebase guarantees)
+
+1. **No secrets on argv.** `cred set <server> <KEY>` reads the value from a hidden stdin prompt. Process listings and shell history never contain secret values. `cred list` prints key names only.
+2. **No secrets in logs.** A tracing redaction layer scrubs all resolved secret values from log output. An automated test injects a sentinel secret and asserts it never appears in any log line. This test is a release gate.
+3. **Least-privilege injection.** Credential env vars are injected per-child at spawn time; no upstream inherits the aggregator's full environment or another server's secrets.
+4. **No secrets on disk outside the keychain.** Ever. The v1.1 tool-list disk cache contains tool metadata only, never credentials, and is fully reconstructible.
+5. **Credential backend chain.** `--credential-store` selects the *preferred* backend (default: keyring); the process environment is always the fallback (headless Linux, CI, containers). Failures state which backend failed and why.
+
+## Access Control Reality
+
+The meta-tool indirection has a consequence users must understand: to the client, every upstream call is the single tool `invoke_tool`. **Client-side per-tool permission prompts therefore collapse** — approving `invoke_tool` once approves everything the namespace exposes. Additionally, OpenCode does not surface tool annotations at all (verified empirically), so the conservative `destructiveHint` on `invoke_tool` only helps on annotation-aware clients like Claude Code.
+
+**The namespace tool-filter is the real permission layer.** Recommendations:
+
+- Give each project a namespace exposing only the servers and tools it needs.
+- Use read-only namespaces (allow-list only query/read tools) for sessions that shouldn't mutate anything.
+- Don't put destructive-capable servers in the `default` namespace if you use `default` casually.
+- Where upstreams offer their own hardening (e.g., a Postgres server's read-only mode), use it — defense in depth; the aggregator's ACL is name-level, not argument-level.
+- **Beware full-filesystem upstreams.** Some servers expose broad read/write capability beyond their headline tool — e.g. the Morph fast-apply server in `ALL_TOOLS: "true"` mode is a general filesystem read/write/list server, not just `edit_file`. A namespace that looks read-only but contains such a server is *not* read-only. Scope these deliberately: expose only the intended tools via the per-server tool-filter, or run the upstream in its own restricted mode. The aggregator's namespace filter is name-level — it controls which tools are reachable, not what arguments they accept.
+
+## Operator Guidance
+
+- **Pin upstream versions.** `npx -y some-server@1.2.3`, never floating latest. An MCP server update is a code-execution event on your machine.
+- **Review what you connect.** Prefer servers with pinned, auditable releases.
+- **Per-server timeouts** (`timeout_secs`) limit how long a misbehaving upstream can hold resources.
+- Logs (`--log-file`) record every tool call (server, tool, latency, outcome) — useful as an audit trail; they are redacted but still treat them as sensitive (they reveal activity patterns and tool arguments are upstream-visible by necessity).
+
+## Supply Chain (project itself)
+
+- `Cargo.lock` committed; `rmcp` and all dependencies pinned.
+- `cargo audit` and `cargo deny` run in CI on every commit.
+- Deliberately minimal dependency tree (no web framework, no database, no TLS stack unless a remote upstream requires HTTPS).
+- Release binaries published with checksums and signatures.
+- Reproducible release builds are a goal; deviations documented.
+
+## Out of Scope (and why)
+
+- **Memory zeroization** of secrets adds little here: the secret must live in the child process's environment for the upstream to function, so wiping the aggregator's copy doesn't change the exposure. Not advertised as protection.
+- **OAuth flows** are deferred to v1.1 (out-of-band `auth` subcommand); MVP supports static `Authorization` header injection from the credential store.
+
+## Reporting a Vulnerability
+
+Please report security issues privately to <SECURITY_CONTACT_EMAIL> rather than opening a public issue. We aim to acknowledge within 72 hours.
