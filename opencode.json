@@ -8,7 +8,7 @@
     },
     "glasswing": {
       "type": "local",
-      "command": ["glasswing", "docs"],
+      "command": ["glasswing", "docs", "--read-only=false"],
       "enabled": true
     }
   },

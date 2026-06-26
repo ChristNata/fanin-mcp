@@ -5,7 +5,7 @@
     },
     "glasswing": {
       "command": "glasswing",
-      "args": ["docs"]
+      "args": ["docs", "--read-only=false"]
     }
   }
 }
