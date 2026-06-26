@@ -15,7 +15,8 @@
 # Obsidian vault — ignore volatile workspace/cache, keep shared notes + settings
 docs/.obsidian/workspace*.json
 docs/.obsidian/cache
-docs/.obsidian/.trash/
+# glasswing/Obsidian soft-delete lands trashed notes here (vault-root .trash)
+docs/.trash/
 
 # OS
 .DS_Store
