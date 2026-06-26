@@ -83,7 +83,7 @@ impl ClientHandler for UpstreamClientHandler {
     ) {
         if let Some(path) = &self.log_file {
             let line = format!("logging {:?}: {}", params.level, params.data);
-            append_log_line(path.clone(), self.server.clone(), line);
+            append_log_line(path.clone(), self.server.clone(), line).await;
         }
     }
 
@@ -94,7 +94,7 @@ impl ClientHandler for UpstreamClientHandler {
     ) {
         if let Some(path) = &self.log_file {
             let line = format!("progress {:?}", params);
-            append_log_line(path.clone(), self.server.clone(), line);
+            append_log_line(path.clone(), self.server.clone(), line).await;
         }
     }
 }

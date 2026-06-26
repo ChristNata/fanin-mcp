@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "review-alignment",
+  "current_step": "push",
   "steps": {
     "plan": {
       "status": "complete",
@@ -22,20 +22,24 @@
       "at": "2026-06-26T16:10:00Z"
     },
     "review-alignment": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-26T16:00:00Z"
     },
     "review-adversarial": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-26T16:07:00Z"
     },
     "review-general": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-26T16:00:00Z"
     },
     "review-synthesis": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-26T16:20:00Z"
+    },
+    "review-fixes": {
+      "status": "complete",
+      "at": "2026-06-26T16:35:00Z"
     }
   }
 }

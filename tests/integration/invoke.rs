@@ -274,8 +274,7 @@ async fn invoke_tool_known_server_unknown_tool_returns_structured_error() {
                 "name": "probe__does_not_exist",
                 "arguments": {},
             }),
-        )
-        ,
+        ),
     )
     .await
     .expect("invoke_tool unknown tool must complete");
@@ -305,8 +304,7 @@ async fn invoke_tool_name_without_delimiter_returns_structured_error() {
                 "name": "echo_ok",
                 "arguments": {},
             }),
-        )
-        ,
+        ),
     )
     .await
     .expect("invoke_tool without delimiter must complete");

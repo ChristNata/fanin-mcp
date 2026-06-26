@@ -43,9 +43,7 @@ const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 #[tokio::test]
 async fn downstream_tools_list_does_not_spawn_upstream() {
     let log_path = fx::empty_log_file_path();
-    let cfg = fx::ConfigBuilder::new()
-        .log_file(&log_path)
-        .write();
+    let cfg = fx::ConfigBuilder::new().log_file(&log_path).write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
@@ -199,12 +197,12 @@ async fn concurrent_first_calls_spawn_exactly_one_upstream() {
         )
         .await;
 
-    let resp_a = timeout(SPAWN_DEADLINE, child.wait_for_id(id_a)).await.expect(
-        "first concurrent list_tools must complete within deadline",
-    );
-    let resp_b = timeout(SPAWN_DEADLINE, child.wait_for_id(id_b)).await.expect(
-        "second concurrent list_tools must complete within deadline",
-    );
+    let resp_a = timeout(SPAWN_DEADLINE, child.wait_for_id(id_a))
+        .await
+        .expect("first concurrent list_tools must complete within deadline");
+    let resp_b = timeout(SPAWN_DEADLINE, child.wait_for_id(id_b))
+        .await
+        .expect("second concurrent list_tools must complete within deadline");
 
     common::assert_no_rpc_error(&resp_a, "concurrent list_tools #1");
     common::assert_no_rpc_error(&resp_b, "concurrent list_tools #2");

@@ -58,9 +58,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
 #[tokio::test]
 async fn full_phase1_path_config_to_reverse_traffic_passes() {
     let log_path = fx::empty_log_file_path();
-    let cfg = fx::ConfigBuilder::new()
-        .log_file(&log_path)
-        .write();
+    let cfg = fx::ConfigBuilder::new().log_file(&log_path).write();
     let path_str = cfg.path_str();
 
     // 1. Config load + startup. Initialize must be fast (< 500ms, criterion 5)
@@ -101,9 +99,18 @@ async fn full_phase1_path_config_to_reverse_traffic_passes() {
     let ann = invoke_def
         .get("annotations")
         .expect("invoke_tool must carry annotations");
-    assert_eq!(ann.get("destructiveHint").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(ann.get("readOnlyHint").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(ann.get("openWorldHint").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        ann.get("destructiveHint").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        ann.get("readOnlyHint").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        ann.get("openWorldHint").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     // 3. Lazy spawn: downstream tools/list must NOT have spawned the upstream.
     //    The log file must be empty of any probe line so far.
@@ -138,7 +145,13 @@ async fn full_phase1_path_config_to_reverse_traffic_passes() {
                 .map(String::from)
         })
         .collect();
-    for expected in ["echo_ok", "always_error", "slow_tool", "dangerous_noop", "needs_sampling"] {
+    for expected in [
+        "echo_ok",
+        "always_error",
+        "slow_tool",
+        "dangerous_noop",
+        "needs_sampling",
+    ] {
         assert!(
             tool_names.iter().any(|n| n == expected),
             "gate: list_tools must include probe tool `{expected}`; got: {tool_names:?}"
@@ -173,7 +186,11 @@ async fn full_phase1_path_config_to_reverse_traffic_passes() {
         .cloned()
         .unwrap_or_else(|| panic!("gate: get_tool_schema returned no result"));
     if let Some(is_error) = schema_result.get("isError") {
-        assert_ne!(is_error.as_bool(), Some(true), "gate: get_tool_schema must succeed");
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "gate: get_tool_schema must succeed"
+        );
     }
 
     // 7. Invoke end-to-end: invoke_tool probe__echo_ok returns the echoed

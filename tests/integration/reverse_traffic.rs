@@ -374,9 +374,7 @@ async fn child_stderr_does_not_reach_aggregator_stdout() {
 #[tokio::test]
 async fn child_stderr_lands_in_log_sink_with_server_prefix() {
     let log_path = fx::empty_log_file_path();
-    let cfg = fx::ConfigBuilder::new()
-        .log_file(&log_path)
-        .write();
+    let cfg = fx::ConfigBuilder::new().log_file(&log_path).write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
@@ -401,9 +399,8 @@ async fn child_stderr_lands_in_log_sink_with_server_prefix() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     child.into_guard().shutdown().await.ok();
 
-    let log_contents = std::fs::read_to_string(&log_path).unwrap_or_else(|e| {
-        panic!("failed to read log file at {log_path}: {e}")
-    });
+    let log_contents = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| panic!("failed to read log file at {log_path}: {e}"));
 
     // The server name in the config is `probe`; the prefix may be `[probe]`
     // or `probe` — assert the configured name appears in at least one line.

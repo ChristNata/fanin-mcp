@@ -290,10 +290,7 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
 ///
 /// `config_path` is passed verbatim to `--config`; the caller is responsible
 /// for keeping the temp config file alive (see `fixtures::ConfigFile`).
-pub async fn spawn_fanin_with_config(
-    config_path: &str,
-    namespace: Option<&str>,
-) -> JsonRpcChild {
+pub async fn spawn_fanin_with_config(config_path: &str, namespace: Option<&str>) -> JsonRpcChild {
     let mut extra: Vec<String> = Vec::new();
     extra.push("--config".to_string());
     extra.push(config_path.to_string());

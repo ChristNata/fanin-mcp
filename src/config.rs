@@ -74,14 +74,12 @@ pub struct TomlConfig {
 /// A single stdio upstream server (`[servers.<name>]`).
 ///
 /// Fields are read by later phases (registry/process forward path); Phase 1
-/// only validates `command` presence and server names.
+/// validates `transport`, `command` presence, and server names.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     /// Transport kind. Optional in Phase 1; defaults to `"stdio"`. Any other
-    /// value is out of scope for Phase 1 and is accepted-but-ignored here
-    /// (HTTP/remote transports are later phases); the field exists so a
-    /// config that omits it deserializes cleanly.
+    /// value fails startup because Phase 1 has no remote transport path.
     #[serde(default)]
     pub transport: Option<String>,
     /// The spawn command. Required for stdio servers; a missing `command`
@@ -143,7 +141,18 @@ impl TomlConfig {
             validate_server_name(name)?;
         }
 
-        // 2. stdio servers must declare a `command`. A missing command fails
+        // 2. Transport is optional but, when present, must be the only Phase 1
+        //    transport: stdio. Remote transports are later phases.
+        for (name, server) in &self.servers {
+            if !matches!(server.transport.as_deref(), None | Some("stdio")) {
+                return Err(StartupError::UnsupportedTransport {
+                    server: name.clone(),
+                    transport: server.transport.clone().unwrap_or_default(),
+                });
+            }
+        }
+
+        // 3. stdio servers must declare a `command`. A missing command fails
         //    startup (a server table without the spawn entry is malformed).
         for (name, server) in &self.servers {
             if !matches!(server.command.as_deref().map(str::trim), Some(command) if !command.is_empty())
@@ -154,7 +163,7 @@ impl TomlConfig {
             }
         }
 
-        // 3. Resolve the active namespace. Empty `--namespace` selects the
+        // 4. Resolve the active namespace. Empty `--namespace` selects the
         //    default. An unknown namespace (not present in [namespaces]) fails
         //    startup.
         let active = if namespace.is_empty() {

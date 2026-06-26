@@ -161,8 +161,7 @@ async fn server_name_with_single_underscore_fails_startup() {
 #[tokio::test]
 async fn unknown_namespace_fails_startup_before_serving() {
     let cfg = fx::ConfigBuilder::new().write();
-    let mut child =
-        common::spawn_fanin_with_config(&cfg.path_str(), Some("nope")).await;
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), Some("nope")).await;
     assert_does_not_serve(&mut child).await;
     child.into_guard().shutdown().await.ok();
 }
@@ -181,12 +180,11 @@ async fn default_namespace_preserved_when_flag_omitted() {
         .write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
 
-    let init = timeout(
-        Duration::from_secs(10),
-        common::initialize(&mut child),
-    )
-    .await
-    .expect("initialize must return within 10s when the default namespace is selected by omission");
+    let init = timeout(Duration::from_secs(10), common::initialize(&mut child))
+        .await
+        .expect(
+            "initialize must return within 10s when the default namespace is selected by omission",
+        );
     assert!(
         init.get("serverInfo").is_some(),
         "default namespace must start the aggregator"

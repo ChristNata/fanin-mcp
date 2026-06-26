@@ -137,7 +137,10 @@ impl ConfigBuilder {
     }
 
     /// Override the namespace's server list.
-    pub fn namespace_servers(mut self, servers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn namespace_servers(
+        mut self,
+        servers: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         self.namespace_servers = servers.into_iter().map(|s| s.into()).collect();
         self
     }
@@ -164,15 +167,15 @@ impl ConfigBuilder {
         s.push_str("transport = \"stdio\"\n");
         // command is a path; quote it. TOML basic strings escape backslashes
         // on Windows, so use a literal string for safety.
-        s.push_str(&format!(
-            "command = '{}'\n",
-            escape_literal(&self.command)
-        ));
+        s.push_str(&format!("command = '{}'\n", escape_literal(&self.command)));
         if self.args.is_empty() {
             s.push_str("args = []\n");
         } else {
-            let quoted: Vec<String> =
-                self.args.iter().map(|a| format!("'{}'", escape_literal(a))).collect();
+            let quoted: Vec<String> = self
+                .args
+                .iter()
+                .map(|a| format!("'{}'", escape_literal(a)))
+                .collect();
             s.push_str(&format!("args = [{}]\n", quoted.join(", ")));
         }
         if !self.env.is_empty() {
@@ -210,8 +213,8 @@ impl ConfigBuilder {
     /// stays alive for the lifetime of the returned [`ConfigFile`].
     pub fn write(self) -> ConfigFile {
         let toml = self.to_toml();
-        let mut tmp = NamedTempFile::new()
-            .expect("failed to create temp config file in OS tmp dir");
+        let mut tmp =
+            NamedTempFile::new().expect("failed to create temp config file in OS tmp dir");
         tmp.write_all(toml.as_bytes())
             .expect("failed to write Phase 1 config to temp file");
         // Flush + keep the handle; the path is valid while the handle lives.

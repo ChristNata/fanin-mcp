@@ -66,14 +66,14 @@ impl Registry {
             return Ok(entry);
         }
 
-        let server_config = self
-            .config
-            .servers
-            .get(server)
-            .cloned()
-            .ok_or_else(|| ToolError::UnknownServer {
-                server: server.to_string(),
-            })?;
+        let server_config =
+            self.config
+                .servers
+                .get(server)
+                .cloned()
+                .ok_or_else(|| ToolError::UnknownServer {
+                    server: server.to_string(),
+                })?;
 
         let entry = Arc::new(connect(server, &server_config).await?);
         self.entries
@@ -137,13 +137,12 @@ async fn connect(server: &str, config: &ServerConfig) -> Result<UpstreamEntry, T
     let service = Arc::new(service);
     let tools = service
         .peer()
-        .list_tools(None)
+        .list_all_tools()
         .await
         .map_err(|e| ToolError::UpstreamConnect {
             server: server.to_string(),
             message: e.to_string(),
-        })?
-        .tools;
+        })?;
 
     Ok(UpstreamEntry { service, tools })
 }

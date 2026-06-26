@@ -272,9 +272,7 @@ async fn get_tool_schema_returns_probe_echo_ok_input_schema() {
         .unwrap_or_else(|| panic!("get_tool_schema result must carry a text content block"));
 
     let schema: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-        panic!(
-            "get_tool_schema text content must be valid JSON (the schema); got: {text:?}\n{e}"
-        )
+        panic!("get_tool_schema text content must be valid JSON (the schema); got: {text:?}\n{e}")
     });
 
     // The probe's echo_ok schema is an object with a `message` string property.

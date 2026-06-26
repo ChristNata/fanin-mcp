@@ -296,8 +296,21 @@ impl Aggregator {
             }
             .as_result();
         }
-        let raw_arguments = args.get("arguments").and_then(|v| v.as_object()).cloned();
-        match registry.call_tool(server, tool, raw_arguments).await {
+        let Some(raw_arguments) = args.get("arguments") else {
+            return ToolError::InvalidRequest {
+                tool: "invoke_tool".to_string(),
+                message: "missing object `arguments`".to_string(),
+            }
+            .as_result();
+        };
+        let Some(raw_arguments) = raw_arguments.as_object().cloned() else {
+            return ToolError::InvalidRequest {
+                tool: "invoke_tool".to_string(),
+                message: "`arguments` must be an object".to_string(),
+            }
+            .as_result();
+        };
+        match registry.call_tool(server, tool, Some(raw_arguments)).await {
             Ok(result) => result,
             Err(e) => e.as_result(),
         }

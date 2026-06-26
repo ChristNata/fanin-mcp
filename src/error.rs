@@ -34,11 +34,18 @@ pub enum ToolError {
     /// A requested upstream tool is unknown.
     UnknownTool { server: String, tool: String },
     /// The namespace ACL denied a server/tool.
-    NamespaceDenied { server: String, tool: Option<String> },
+    NamespaceDenied {
+        server: String,
+        tool: Option<String>,
+    },
     /// Spawning or initializing the upstream failed.
     UpstreamConnect { server: String, message: String },
     /// The upstream tool call itself failed before producing a tool result.
-    UpstreamCall { server: String, tool: String, message: String },
+    UpstreamCall {
+        server: String,
+        tool: String,
+        message: String,
+    },
 }
 
 impl ToolError {
@@ -54,21 +61,41 @@ impl ToolError {
             ToolError::InvalidRequest { tool, message } => {
                 structured_error(None, Some(tool), "invalid_request", message, true)
             }
-            ToolError::UnknownServer { server } => {
-                structured_error(Some(server), None, "unknown_server", "server is not configured or not visible in the active namespace", true)
-            }
-            ToolError::UnknownTool { server, tool } => {
-                structured_error(Some(server), Some(tool), "unknown_tool", &format!("unknown upstream tool `{tool}` on server `{server}`"), true)
-            }
-            ToolError::NamespaceDenied { server, tool } => {
-                structured_error(Some(server), tool.as_deref(), "namespace_denied", "server or tool is denied by the active namespace", true)
-            }
+            ToolError::UnknownServer { server } => structured_error(
+                Some(server),
+                None,
+                "unknown_server",
+                "server is not configured or not visible in the active namespace",
+                true,
+            ),
+            ToolError::UnknownTool { server, tool } => structured_error(
+                Some(server),
+                Some(tool),
+                "unknown_tool",
+                &format!("unknown upstream tool `{tool}` on server `{server}`"),
+                true,
+            ),
+            ToolError::NamespaceDenied { server, tool } => structured_error(
+                Some(server),
+                tool.as_deref(),
+                "namespace_denied",
+                "server or tool is denied by the active namespace",
+                true,
+            ),
             ToolError::UpstreamConnect { server, message } => {
                 structured_error(Some(server), None, "upstream_connect_failed", message, true)
             }
-            ToolError::UpstreamCall { server, tool, message } => {
-                structured_error(Some(server), Some(tool), "upstream_call_failed", message, true)
-            }
+            ToolError::UpstreamCall {
+                server,
+                tool,
+                message,
+            } => structured_error(
+                Some(server),
+                Some(tool),
+                "upstream_call_failed",
+                message,
+                true,
+            ),
         }
     }
 
@@ -108,6 +135,8 @@ pub enum StartupError {
     /// A server name is outside `[a-z0-9-]+` (rejects uppercase, underscore,
     /// `__`, spaces, and any other disallowed character — GOTCHA #15).
     InvalidServerName { server: String, reason: String },
+    /// A server transport is outside the Phase 1 stdio-only contract.
+    UnsupportedTransport { server: String, transport: String },
     /// A stdio server table is missing the `command` field.
     StdioServerMissingCommand { server: String },
     /// The resolved `--namespace` is not present in `[namespaces]`.
@@ -125,6 +154,12 @@ impl std::fmt::Display for StartupError {
             }
             StartupError::InvalidServerName { server, reason } => {
                 write!(f, "invalid server name `{server}`: {reason}")
+            }
+            StartupError::UnsupportedTransport { server, transport } => {
+                write!(
+                    f,
+                    "unsupported transport `{transport}` for server `{server}`; Phase 1 supports only `stdio`"
+                )
             }
             StartupError::StdioServerMissingCommand { server } => {
                 write!(
