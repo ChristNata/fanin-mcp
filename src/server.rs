@@ -169,6 +169,9 @@ impl Aggregator {
                 Err(e) => return e.as_result(),
             };
             for tool in tools {
+                if !namespace.is_tool_allowed(&server, &tool.name) {
+                    continue; // discovery-time filter: denied tool never emitted
+                }
                 rows.push(serde_json::json!({
                     "server": server,
                     "tool": tool.name,

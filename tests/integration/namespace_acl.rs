@@ -59,9 +59,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
         })
         .unwrap_or_else(|| panic!("list_tools result must carry a text content block"));
     let parsed: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-        panic!(
-            "list_tools text content must be valid JSON (the row array); got: {text:?}\n{e}"
-        )
+        panic!("list_tools text content must be valid JSON (the row array); got: {text:?}\n{e}")
     });
     parsed
         .as_array()
@@ -342,8 +340,7 @@ async fn tool_level_acl_filters_list_schema_and_invoke() {
         .server(fx::ServerEntry::new("alpha"))
         .server(fx::ServerEntry::new("beta"))
         .namespace(
-            fx::NamespaceEntry::new("filtered", ["alpha", "beta"])
-                .with_tools("alpha", ["echo_ok"]),
+            fx::NamespaceEntry::new("filtered", ["alpha", "beta"]).with_tools("alpha", ["echo_ok"]),
         )
         .write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), Some("filtered")).await;
@@ -439,7 +436,10 @@ async fn tool_level_acl_filters_list_schema_and_invoke() {
         .get("result")
         .cloned()
         .unwrap_or_else(|| panic!("get_tool_schema alpha__dangerous_noop returned no result"));
-    common::assert_is_error_result(&schema_denied_result, "get_tool_schema alpha__dangerous_noop");
+    common::assert_is_error_result(
+        &schema_denied_result,
+        "get_tool_schema alpha__dangerous_noop",
+    );
 
     // invoke_tool: echo_ok succeeds; dangerous_noop returns namespace_denied.
     let invoke_ok = timeout(
@@ -510,10 +510,7 @@ async fn namespace_denied_error_shape_for_denied_server_and_tool() {
     let cfg = fx::MultiConfigBuilder::new()
         .server(fx::ServerEntry::new("alpha"))
         .server(fx::ServerEntry::new("beta"))
-        .namespace(
-            fx::NamespaceEntry::new("shaped", ["alpha"])
-                .with_tools("alpha", ["echo_ok"]),
-        )
+        .namespace(fx::NamespaceEntry::new("shaped", ["alpha"]).with_tools("alpha", ["echo_ok"]))
         .write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), Some("shaped")).await;
     common::initialize(&mut child).await;

@@ -107,9 +107,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
         })
         .unwrap_or_else(|| panic!("list_tools result must carry a text content block"));
     let parsed: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-        panic!(
-            "list_tools text content must be valid JSON (the row array); got: {text:?}\n{e}"
-        )
+        panic!("list_tools text content must be valid JSON (the row array); got: {text:?}\n{e}")
     });
     parsed
         .as_array()

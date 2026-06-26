@@ -38,6 +38,17 @@ The meta-tool indirection has a consequence users must understand: to the client
 - Where upstreams offer their own hardening (e.g., a Postgres server's read-only mode), use it — defense in depth; the aggregator's ACL is name-level, not argument-level.
 - **Beware full-filesystem upstreams.** Some servers expose broad read/write capability beyond their headline tool — e.g. the Morph fast-apply server in `ALL_TOOLS: "true"` mode is a general filesystem read/write/list server, not just `edit_file`. A namespace that looks read-only but contains such a server is *not* read-only. Scope these deliberately: expose only the intended tools via the per-server tool-filter, or run the upstream in its own restricted mode. The aggregator's namespace filter is name-level — it controls which tools are reachable, not what arguments they accept.
 
+Concrete shape of the read-only namespace:
+
+```toml
+[namespaces.readonly]
+servers = ["postgres", "obsidian"]
+
+[namespaces.readonly.tools]
+postgres = ["query", "list_tables"]  # write tools (insert, update, ...) are thereby hidden
+# obsidian present in `servers` but absent from `[...tools]` => all its tools visible
+```
+
 ## Operator Guidance
 
 - **Pin upstream versions.** `npx -y some-server@1.2.3`, never floating latest. An MCP server update is a code-execution event on your machine.

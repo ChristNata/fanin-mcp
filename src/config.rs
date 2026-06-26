@@ -100,15 +100,24 @@ pub struct ServerConfig {
 
 /// A single namespace (`[namespaces.<name>]`).
 ///
-/// The `servers` field is read by later phases (namespace ACL / discovery);
-/// Phase 1 only checks namespace existence.
+/// `servers` is the server allow-list.
+/// `tools` is the optional per-server name-level tool allow-list:
+///   [namespaces.<name>.tools]
+///   alpha = ["echo_ok"]
+/// A server in `servers` with no `tools` entry exposes all its tools.
+/// A present list is an exact allow-list of tool names.
+/// Tool names are not validated at startup (tools known only after discovery).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct NamespaceConfig {
-    /// The servers visible in this namespace. Phase 1 reads only this field;
-    /// the `tools.<server>` filter (ARCHITECTURE) is Phase 2 and ignored.
+    /// The servers visible in this namespace.
     #[serde(default)]
     pub servers: Vec<String>,
+    /// Optional per-server tool allow-lists (name-level only).
+    /// Keys are server names (should be in `servers`); values are exact tool
+    /// name lists. Absent entry for an allowed server => all tools visible.
+    #[serde(default)]
+    pub tools: HashMap<String, Vec<String>>,
 }
 
 /// Load and validate the TOML config file at `config_path`.

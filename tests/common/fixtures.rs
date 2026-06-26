@@ -290,7 +290,10 @@ pub struct NamespaceEntry {
 impl NamespaceEntry {
     /// A namespace with a server allow-list and no tool filters (all tools on
     /// each allowed server are visible).
-    pub fn new(name: impl Into<String>, servers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        servers: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
             name: name.into(),
             servers: servers.into_iter().map(|s| s.into()).collect(),
@@ -307,10 +310,8 @@ impl NamespaceEntry {
         server: impl Into<String>,
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.tools.push((
-            server.into(),
-            tools.into_iter().map(|t| t.into()).collect(),
-        ));
+        self.tools
+            .push((server.into(), tools.into_iter().map(|t| t.into()).collect()));
         self
     }
 }
