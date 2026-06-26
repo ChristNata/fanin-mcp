@@ -141,6 +141,12 @@ pub enum StartupError {
     StdioServerMissingCommand { server: String },
     /// The resolved `--namespace` is not present in `[namespaces]`.
     UnknownNamespace { namespace: String },
+    /// A `[namespaces.<name>.tools]` key names a server that is not in that
+    /// namespace's `servers` allow-list. A typo'd key would silently broaden
+    /// visibility (an allowed server with no matching `tools` entry exposes
+    /// all tools), so the config fails fast with the offending namespace +
+    /// server named.
+    ToolFilterUnknownServer { namespace: String, server: String },
 }
 
 impl std::fmt::Display for StartupError {
@@ -171,6 +177,14 @@ impl std::fmt::Display for StartupError {
                 write!(
                     f,
                     "unknown namespace `{namespace}`; not present in [namespaces]"
+                )
+            }
+            StartupError::ToolFilterUnknownServer { namespace, server } => {
+                write!(
+                    f,
+                    "namespace `{namespace}` has a `tools.{server}` filter but `{server}` is not in \
+                     that namespace's `servers` allow-list; declare the server in `servers` or remove \
+                     the stray `tools` key (an allowed server with no `tools` entry exposes all tools)"
                 )
             }
         }

@@ -15,7 +15,10 @@ pub struct ActiveNamespace {
     servers: HashSet<String>,
     /// Per-server tool allow-lists. Key present => exact allow-list.
     /// Key absent for an allowed server => all tools on that server visible.
-    tools: HashMap<String, Vec<String>>,
+    /// Stored as `HashSet` so `is_tool_allowed` is an O(1) membership check
+    /// rather than a linear scan — `list_tools` filters every discovered
+    /// tool against this map.
+    tools: HashMap<String, HashSet<String>>,
 }
 
 impl ActiveNamespace {
@@ -29,7 +32,14 @@ impl ActiveNamespace {
         let (servers, tools) = config
             .namespaces
             .get(&name)
-            .map(|ns| (ns.servers.iter().cloned().collect(), ns.tools.clone()))
+            .map(|ns| {
+                let tools: HashMap<String, HashSet<String>> = ns
+                    .tools
+                    .iter()
+                    .map(|(server, names)| (server.clone(), names.iter().cloned().collect()))
+                    .collect();
+                (ns.servers.iter().cloned().collect(), tools)
+            })
             .unwrap_or_default();
         Self {
             name,
@@ -59,7 +69,7 @@ impl ActiveNamespace {
         }
         self.tools
             .get(server)
-            .map_or(true, |list| list.iter().any(|t| t == tool))
+            .map_or(true, |list| list.contains(tool))
     }
 
     /// Lists visible configured servers in deterministic order.

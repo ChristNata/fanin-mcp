@@ -19,6 +19,9 @@
 //!
 //! [namespaces.<name>]
 //! servers = ["<name>"]         # the servers visible in this namespace
+//!
+//! [namespaces.<name>.tools]    # optional per-server name-level allow-list
+//! <server> = ["<tool>", ...]   # absent entry for an allowed server => all its tools visible
 //! ```
 
 use std::collections::HashMap;
@@ -184,6 +187,29 @@ impl TomlConfig {
             return Err(StartupError::UnknownNamespace {
                 namespace: active.to_string(),
             });
+        }
+
+        // 5. Every `[namespaces.<name>.tools]` server key MUST also appear in
+        //    that namespace's `servers` allow-list. A typo'd `tools.<server>`
+        //    key would otherwise be silently ignored: an allowed server with
+        //    no matching `tools` entry exposes ALL its tools, so a stray key
+        //    cannot grant access but the *intended* restriction fails open
+        //    without any startup signal. Fail fast across ALL namespaces so a
+        //    malformed config surfaces regardless of which namespace is
+        //    currently selected (consistent startup validation).
+        //
+        //    Tool NAMES are intentionally NOT validated here — tools are only
+        //    known after lazy discovery, so a listed tool that does not exist
+        //    on the upstream simply never matches (see `tests.md`).
+        for (ns_name, ns) in &self.namespaces {
+            for tool_server in ns.tools.keys() {
+                if !ns.servers.iter().any(|s| s == tool_server) {
+                    return Err(StartupError::ToolFilterUnknownServer {
+                        namespace: ns_name.clone(),
+                        server: tool_server.clone(),
+                    });
+                }
+            }
         }
 
         Ok(())
