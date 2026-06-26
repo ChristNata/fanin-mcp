@@ -21,6 +21,8 @@ mod discovery;
 mod gate;
 mod invoke;
 mod manual_e2e;
+mod multi_upstream;
+mod namespace_acl;
 mod pinning;
 mod probe;
 mod registry;

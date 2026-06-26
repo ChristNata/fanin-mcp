@@ -231,6 +231,184 @@ fn escape_literal(s: &str) -> String {
     s.replace('\u{0000}', "").replace('\'', "\\'")
 }
 
+// ---- Phase 2 multi-upstream + namespace-ACL fixtures -----------------------
+
+/// A server entry for the Phase 2 multi-server config builder.
+///
+/// Each server is the same `probe-server` binary registered under a distinct
+/// configured name (D-016 / plan §Probe fixture decision). No second fixture
+/// identity is introduced — the configured name is what the aggregator routes
+/// on, so registering the probe under `alpha`, `beta`, `gamma` simulates N
+/// distinct upstreams from the proxy's perspective.
+#[allow(dead_code)] // pub fixture API: not every test uses every field.
+#[derive(Debug, Clone)]
+pub struct ServerEntry {
+    /// The `[servers.<name>]` key — the configured server name the aggregator
+    /// routes on. Must match `[a-z0-9-]+` (GOTCHA #15).
+    pub name: String,
+    /// Optional per-server log sink. When `None`, no `log_file` is written.
+    pub log_file: Option<String>,
+}
+
+impl ServerEntry {
+    /// A server entry with no log file.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            log_file: None,
+        }
+    }
+
+    /// Attach a per-server log sink.
+    pub fn with_log_file(mut self, log_file: impl Into<String>) -> Self {
+        self.log_file = Some(log_file.into());
+        self
+    }
+}
+
+/// A namespace entry for the Phase 2 namespace-ACL config builder.
+///
+/// Encodes the resolved Open Question #1 schema: a `servers` allow-list plus
+/// an optional per-server `tools.<server> = [...]` name-level allow-list. A
+/// server present in `servers` with NO `tools` entry exposes ALL its tools;
+/// a server with a `tools` entry exposes exactly those tool names
+/// (D-006, GOTCHA #31, plan §Phase 2).
+#[allow(dead_code)] // pub fixture API: not every test uses every field.
+#[derive(Debug, Clone)]
+pub struct NamespaceEntry {
+    /// The `[namespaces.<name>]` key.
+    pub name: String,
+    /// The server allow-list (`servers = [...]`).
+    pub servers: Vec<String>,
+    /// Per-server tool allow-lists. `tools.<server> = ["tool", ...]`. A server
+    /// in `servers` with no entry here exposes all its tools; a server with an
+    /// entry exposes exactly the listed tool names. Name-level only — no
+    /// parameter-level ACL (D-006).
+    pub tools: Vec<(String, Vec<String>)>,
+}
+
+impl NamespaceEntry {
+    /// A namespace with a server allow-list and no tool filters (all tools on
+    /// each allowed server are visible).
+    pub fn new(name: impl Into<String>, servers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            name: name.into(),
+            servers: servers.into_iter().map(|s| s.into()).collect(),
+            tools: Vec::new(),
+        }
+    }
+
+    /// Add a per-server tool allow-list for `server`. The server must also be
+    /// in `servers` for the filter to apply (a filter on a denied server is
+    /// moot). Present list => exact name-level allow-list; the server is
+    /// already allowed by `servers`.
+    pub fn with_tools(
+        mut self,
+        server: impl Into<String>,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.tools.push((
+            server.into(),
+            tools.into_iter().map(|t| t.into()).collect(),
+        ));
+        self
+    }
+}
+
+/// A builder for a Phase 2 multi-upstream + namespace-ACL TOML config.
+///
+/// Distinct from the Phase 1 [`ConfigBuilder`] (which encodes the single-
+/// upstream Phase 1 schema): this builder supports N named servers (each the
+/// same probe binary under a distinct configured name) and N namespaces, each
+/// with a `servers` allow-list and optional per-server `tools.<server>` name-
+/// level allow-lists (the resolved Open Question #1 shape).
+///
+/// The rendered TOML is the binding Phase 2 config schema the implementer must
+/// parse — see `tests.md` §Config schema (Phase 2 extension). Phase 1 fields
+/// not exercised by Phase 2 (env, args) are omitted; the implementer's Phase 1
+/// parser must still accept this config because it is a strict superset of the
+/// Phase 1 shape.
+#[allow(dead_code)] // pub fixture API: not every test uses every field.
+#[derive(Debug, Clone, Default)]
+pub struct MultiConfigBuilder {
+    servers: Vec<ServerEntry>,
+    namespaces: Vec<NamespaceEntry>,
+}
+
+#[allow(dead_code)] // pub fixture API: not every test uses every method.
+impl MultiConfigBuilder {
+    /// Start a fresh empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a server entry.
+    pub fn server(mut self, entry: ServerEntry) -> Self {
+        self.servers.push(entry);
+        self
+    }
+
+    /// Add a namespace entry.
+    pub fn namespace(mut self, entry: NamespaceEntry) -> Self {
+        self.namespaces.push(entry);
+        self
+    }
+
+    /// Render the TOML to a string.
+    pub fn to_toml(&self) -> String {
+        let mut s = String::new();
+        let probe = probe_bin_path();
+
+        for entry in &self.servers {
+            s.push_str(&format!("[servers.{}]\n", entry.name));
+            s.push_str("transport = \"stdio\"\n");
+            s.push_str(&format!("command = '{}'\n", escape_literal(&probe)));
+            s.push_str("args = []\n");
+            if let Some(log) = &entry.log_file {
+                s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
+            }
+            s.push('\n');
+        }
+
+        for ns in &self.namespaces {
+            s.push_str(&format!("[namespaces.{}]\n", ns.name));
+            let quoted: Vec<String> = ns.servers.iter().map(|n| format!("\"{n}\"")).collect();
+            s.push_str(&format!("servers = [{}]\n", quoted.join(", ")));
+            // Per-server tool allow-lists. The resolved Open Question #1
+            // shape is a single `[namespaces.<name>.tools]` sub-table with
+            // each allowed server as a key mapping to an array of tool names:
+            //   [namespaces.<name>.tools]
+            //   alpha = ["echo_ok", "list_things"]
+            // A server in `servers` with NO entry here exposes all its tools;
+            // a server with an entry exposes exactly the listed tool names.
+            if !ns.tools.is_empty() {
+                s.push_str(&format!("[namespaces.{}.tools]\n", ns.name));
+                for (server, tools) in &ns.tools {
+                    let quoted_tools: Vec<String> =
+                        tools.iter().map(|t| format!("\"{t}\"")).collect();
+                    s.push_str(&format!("{} = [{}]\n", server, quoted_tools.join(", ")));
+                }
+            }
+            s.push('\n');
+        }
+
+        s
+    }
+
+    /// Write the config to a temp file and return the path. The temp file
+    /// stays alive for the lifetime of the returned [`ConfigFile`].
+    pub fn write(self) -> ConfigFile {
+        let toml = self.to_toml();
+        let mut tmp =
+            NamedTempFile::new().expect("failed to create temp config file in OS tmp dir");
+        tmp.write_all(toml.as_bytes())
+            .expect("failed to write Phase 2 config to temp file");
+        tmp.as_file().sync_all().ok();
+        let path = tmp.path().to_path_buf();
+        ConfigFile { _file: tmp, path }
+    }
+}
+
 /// Create an empty log file at a unique temp path and return its absolute
 /// path. The aggregator writes `[server]`-prefixed lines here; the test reads
 /// it back to assert on stderr capture / log notification routing.

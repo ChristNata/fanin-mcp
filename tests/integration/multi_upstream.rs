@@ -1,0 +1,632 @@
+//! Multi-upstream proof — Phase 2 wire-level tests.
+//!
+//! Covers the plan's Phase 1 sub-phase (the headline multi-upstream proof):
+//! master Success Criteria 1, 2, 3, 4, 5, 12, 13, plus the Phase 0/1
+//! regression guard (criterion 13 in the plan's Success Criteria list:
+//! static meta-tools, lazy startup, byte-faithful results, reverse-traffic
+//! handling, stdout discipline remain true under a multi-upstream config).
+//!
+//! The existing `probe-server` binary is registered under distinct configured
+//! server names (`alpha`, `beta`, optionally `gamma`). No second fixture
+//! identity is introduced (plan §Probe fixture decision, master SC 12). The
+//! configured name is what the aggregator routes on, so N registrations of the
+//! same probe simulate N distinct upstreams from the proxy's perspective.
+//!
+//! Headline proof (D-007 / GOTCHA #16): while `alpha__slow_tool` is awaiting a
+//! configured delay, a concurrent `beta__echo_ok` completes successfully within
+//! a deadline strictly shorter than the slow delay. This is CROSS-upstream —
+//! the load-bearing assertion. A same-upstream check is not the headline
+//! (Phase 1 already covered that boundary).
+
+use std::time::Duration;
+
+use serde_json::Value;
+use tokio::time::timeout;
+
+use crate::common;
+use crate::common::expectations as exp;
+use crate::common::fixtures as fx;
+
+/// Deadline for a meta-tool call that may trigger a lazy spawn. Spawning the
+/// probe + initialize + tools/list is well under 2s on any reasonable CI
+/// runner; 15s is a generous ceiling that still catches a hang.
+const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The slow_tool delay used for the cross-upstream non-serialization proof.
+/// Long enough that a serialized (lock-held-across-await) session would make
+/// the concurrent beta echo blow past the proof deadline; short enough to keep
+/// the test fast.
+const SLOW_DELAY_MS: u64 = 800;
+
+/// The proof deadline for the concurrent beta echo — STRICTLY shorter than
+/// `SLOW_DELAY_MS`. If the registry lock were held across the slow await, the
+/// beta call could not complete before the slow call finished (the session
+/// would serialize), so the beta echo would take >= SLOW_DELAY_MS. A correct
+/// lock-discipline impl dispatches the beta call on a separate upstream while
+/// alpha's slow await is still pending, so beta completes well under the slow
+/// delay. The 400ms deadline is half the slow delay — a comfortable margin
+/// that still catches serialization.
+const PROOF_DEADLINE: Duration = Duration::from_millis(400);
+
+/// The exact set of probe tool names (mirrors `tests/integration/discovery.rs`).
+const PROBE_TOOL_NAMES: [&str; 8] = [
+    "echo_ok",
+    "always_error",
+    "slow_tool",
+    "dangerous_noop",
+    "needs_sampling",
+    "echo_image",
+    "needs_elicitation",
+    "needs_roots",
+];
+
+/// Build a two-upstream (alpha + beta) config with a `default` namespace that
+/// exposes both. The probe binary is registered under both names.
+fn alpha_beta_config() -> fx::ConfigFile {
+    fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("alpha"))
+        .server(fx::ServerEntry::new("beta"))
+        .namespace(fx::NamespaceEntry::new("default", ["alpha", "beta"]))
+        .write()
+}
+
+/// Build a three-upstream (alpha + beta + gamma) config with a `default`
+/// namespace exposing all three. Used where wider inventory / switching
+/// coverage is useful.
+fn alpha_beta_gamma_config() -> fx::ConfigFile {
+    fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("alpha"))
+        .server(fx::ServerEntry::new("beta"))
+        .server(fx::ServerEntry::new("gamma"))
+        .namespace(fx::NamespaceEntry::new(
+            "default",
+            ["alpha", "beta", "gamma"],
+        ))
+        .write()
+}
+
+/// Extract the text content of a list_tools result as a JSON string, then
+/// parse it as a JSON array of row objects (mirrors discovery.rs).
+fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("list_tools result missing content array"));
+    assert!(
+        !content.is_empty(),
+        "list_tools result must carry at least one content block"
+    );
+    let text = content
+        .iter()
+        .find_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(String::from)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| panic!("list_tools result must carry a text content block"));
+    let parsed: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        panic!(
+            "list_tools text content must be valid JSON (the row array); got: {text:?}\n{e}"
+        )
+    });
+    parsed
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("list_tools text content must be a JSON array; got: {parsed:?}"))
+}
+
+/// Extract the joined text of a CallToolResult's content array (mirrors
+/// invoke.rs).
+fn result_text(result: &Value) -> String {
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("result missing content array"));
+    content
+        .iter()
+        .filter_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Master SC 1 / P1.SC1: a config with two probe-backed upstreams starts
+/// fanin-mcp successfully. The observable effect is that `initialize` returns
+/// a well-formed result and downstream rmcp `tools/list` returns exactly the
+/// three static meta-tools.
+#[tokio::test]
+async fn multi_upstream_config_starts_aggregator() {
+    let cfg = alpha_beta_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+
+    let init = common::initialize(&mut child).await;
+    assert!(
+        init.get("serverInfo").is_some(),
+        "multi-upstream config must let initialize return serverInfo"
+    );
+    let name = init
+        .get("serverInfo")
+        .and_then(|s| s.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or_default();
+    assert_eq!(name, "fanin-mcp", "server must still name itself fanin-mcp");
+
+    let resp = common::list_tools(&mut child).await;
+    common::assert_no_rpc_error(&resp, "tools/list after multi-upstream config");
+    let tools = resp
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
+    exp::assert_exact_meta_tools(tools);
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC 2 / P1.SC1: starting fanin-mcp and calling downstream rmcp
+/// `tools/list` opens ZERO upstream connections when multiple upstreams are
+/// configured. The observable proxy: after `initialize` + downstream
+/// `tools/list`, the log sink is empty of any `[alpha]`/`[beta]` line — no
+/// upstream was spawned. Downstream `tools/list` is static (D-003, GOTCHA #7);
+/// any upstream touch here would destroy lazy loading.
+#[tokio::test]
+async fn downstream_tools_list_with_multi_upstream_opens_zero_connections() {
+    let log_path = fx::empty_log_file_path();
+    let cfg = fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("alpha").with_log_file(&log_path))
+        .server(fx::ServerEntry::new("beta").with_log_file(&log_path))
+        .namespace(fx::NamespaceEntry::new("default", ["alpha", "beta"]))
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    let resp = common::list_tools(&mut child).await;
+    common::assert_no_rpc_error(&resp, "tools/list");
+    let tools = resp
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
+    exp::assert_exact_meta_tools(tools);
+
+    // Give any would-be spawn a moment to flush stderr to the log file.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        !log.contains("alpha") && !log.contains("beta"),
+        "downstream tools/list must not spawn ANY upstream with multiple \
+         configured (criterion 2 / D-003 / GOTCHA #7); log already contains an \
+         upstream line:\n{log}"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC 3 / P1.SC2: lazy isolation. A meta-tool call targeting `alpha`
+/// leaves `beta` unspawned/uncontacted until a call targets `beta`. The
+/// observable proxy: after calling `list_tools` with `server: "alpha"` (which
+/// spawns alpha), the log sink contains an `alpha` line but NO `beta` line.
+/// Then a call targeting `beta` produces a `beta` line — proving beta was
+/// untouched until explicitly named.
+#[tokio::test]
+async fn targeting_alpha_leaves_beta_unspawned_until_beta_targeted() {
+    let log_path = fx::empty_log_file_path();
+    let cfg = fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("alpha").with_log_file(&log_path))
+        .server(fx::ServerEntry::new("beta").with_log_file(&log_path))
+        .namespace(fx::NamespaceEntry::new("default", ["alpha", "beta"]))
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    // Target alpha only. This spawns alpha; beta must remain untouched.
+    let list = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "list_tools",
+            serde_json::json!({ "server": "alpha" }),
+        ),
+    )
+    .await
+    .expect("list_tools alpha must complete (may spawn alpha)");
+    common::assert_no_rpc_error(&list, "list_tools alpha");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log_after_alpha = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log_after_alpha.contains("alpha"),
+        "targeting alpha must spawn alpha (log should contain an alpha line):\n{log_after_alpha}"
+    );
+    assert!(
+        !log_after_alpha.contains("beta"),
+        "targeting alpha must NOT spawn beta (lazy isolation, criterion 3); \
+         log already contains a beta line:\n{log_after_alpha}"
+    );
+
+    // Now target beta. The log should gain a beta line.
+    let list_beta = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "list_tools",
+            serde_json::json!({ "server": "beta" }),
+        ),
+    )
+    .await
+    .expect("list_tools beta must complete (spawns beta)");
+    common::assert_no_rpc_error(&list_beta, "list_tools beta");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log_after_beta = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log_after_beta.contains("beta"),
+        "targeting beta must spawn beta (criterion 3); log has no beta line:\n{log_after_beta}"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC 4 / P1.SC3: single-spawn under race. Two concurrent first calls
+/// to the same cold server initialize that upstream exactly once. The
+/// observable proxy is the strongest the harness supports on Windows: the
+/// consistent-success proxy (both calls SUCCEED and return consistent
+/// inventory). A double-spawn race would either error one call or return
+/// inconsistent results. The strict process-count assertion is platform-
+/// specific and brittle in CI; the consistent-success proxy is what the plan
+/// sanctions for the wire-level suite. See `tests.md` §Boundaries for the
+/// Windows-specific limitation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_first_calls_to_same_cold_server_spawn_once() {
+    let cfg = alpha_beta_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    // Two concurrent list_tools calls filtered to `alpha` — both are "first
+    // calls" that need alpha's inventory. The per-server init guard (D-007,
+    // GOTCHA #17) must serialize the spawn so only one upstream is created.
+    // Use send_request (releases &mut) then wait_for_id for each, so both
+    // requests are truly in flight before either response is read.
+    let id_a = child
+        .send_request(
+            "tools/call",
+            serde_json::json!({ "name": "list_tools", "arguments": { "server": "alpha" } }),
+        )
+        .await;
+    let id_b = child
+        .send_request(
+            "tools/call",
+            serde_json::json!({ "name": "list_tools", "arguments": { "server": "alpha" } }),
+        )
+        .await;
+
+    let resp_a = timeout(SPAWN_DEADLINE, child.wait_for_id(id_a))
+        .await
+        .expect("first concurrent list_tools alpha must complete within deadline");
+    let resp_b = timeout(SPAWN_DEADLINE, child.wait_for_id(id_b))
+        .await
+        .expect("second concurrent list_tools alpha must complete within deadline");
+
+    common::assert_no_rpc_error(&resp_a, "concurrent list_tools alpha #1");
+    common::assert_no_rpc_error(&resp_b, "concurrent list_tools alpha #2");
+
+    // Both must return a SUCCESS content array (alpha's inventory rows), not
+    // a not-implemented error. Consistent success is the proxy for "exactly
+    // one spawn." Requiring success makes the test fail RED against a stub
+    // that returns isError:true without forwarding.
+    for (resp, label) in [(&resp_a, "a"), (&resp_b, "b")] {
+        let result = resp
+            .get("result")
+            .unwrap_or_else(|| panic!("concurrent list_tools alpha {label} missing result"));
+        if let Some(is_error) = result.get("isError") {
+            assert_ne!(
+                is_error.as_bool(),
+                Some(true),
+                "concurrent list_tools alpha {label} must return the inventory, \
+                 not an error (consistent-success proxy for single-spawn, criterion 4)"
+            );
+        }
+        assert!(
+            result.get("content").is_some(),
+            "concurrent list_tools alpha {label} must carry content"
+        );
+    }
+
+    // The two inventories must be consistent (same set of tool names). A
+    // double-spawn race that returned two different upstream connections could
+    // return inconsistent rows.
+    let rows_a = parse_list_tools_rows(resp_a.get("result").unwrap());
+    let rows_b = parse_list_tools_rows(resp_b.get("result").unwrap());
+    let mut names_a: Vec<String> = rows_a
+        .iter()
+        .filter_map(|r| {
+            r.get("tool")
+                .and_then(|t| t.as_str())
+                .or_else(|| r.get("name").and_then(|t| t.as_str()))
+                .map(String::from)
+        })
+        .collect();
+    let mut names_b: Vec<String> = rows_b
+        .iter()
+        .filter_map(|r| {
+            r.get("tool")
+                .and_then(|t| t.as_str())
+                .or_else(|| r.get("name").and_then(|t| t.as_str()))
+                .map(String::from)
+        })
+        .collect();
+    names_a.sort();
+    names_b.sort();
+    assert_eq!(
+        names_a, names_b,
+        "concurrent first calls to the same cold server must return consistent \
+         inventory (criterion 4 / single-spawn proxy); got {names_a:?} vs {names_b:?}"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC 5 / P1.SC4: the headline D-007 / GOTCHA #16 non-serialization
+/// proof. While `alpha__slow_tool` is awaiting a configured delay, a concurrent
+/// `beta__echo_ok` completes successfully within a deadline STRICTLY shorter
+/// than the slow delay. This is CROSS-upstream — the load-bearing assertion.
+///
+/// A registry lock held across the alpha slow await would serialize the whole
+/// session: the beta echo could not be dispatched until alpha's slow call
+/// finished, so beta would take >= SLOW_DELAY_MS. A correct lock-discipline
+/// impl clones the Arc, drops the map lock, and awaits the alpha call on one
+/// upstream while dispatching the beta call on a SEPARATE upstream — so beta
+/// completes well under the slow delay. The PROOF_DEADLINE (400ms) is half the
+/// SLOW_DELAY_MS (800ms): a comfortable margin that still catches serialization.
+///
+/// The test requires REAL forwarding on both upstreams (alpha slow success +
+/// beta echo success), so a not-implemented stub fails RED rather than passing
+/// trivially.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alpha_slow_tool_does_not_block_concurrent_beta_echo() {
+    let cfg = alpha_beta_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    // Issue the slow alpha call WITHOUT waiting for its response. It enters
+    // the registry, spawns alpha, and awaits the slow_tool delay.
+    let slow_id = child
+        .send_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "alpha__slow_tool",
+                    "arguments": { "delay_ms": SLOW_DELAY_MS },
+                },
+            }),
+        )
+        .await;
+
+    // Immediately issue the beta echo. If the registry lock were held across
+    // the alpha slow await, this request would not be dispatched until alpha
+    // finished (>= SLOW_DELAY_MS). A correct impl dispatches beta on a
+    // separate upstream while alpha's slow await is pending.
+    let echo_id = child
+        .send_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "beta__echo_ok",
+                    "arguments": { "message": "non-serialized" },
+                },
+            }),
+        )
+        .await;
+
+    // The load-bearing assertion: beta echo completes within PROOF_DEADLINE,
+    // which is strictly shorter than SLOW_DELAY_MS. A serialized session would
+    // make this timeout (beta can't complete before alpha's 800ms delay).
+    let echo_resp = timeout(PROOF_DEADLINE, child.wait_for_id(echo_id))
+        .await
+        .expect(
+            "beta__echo_ok must complete within {PROOF_DEADLINE:?} while alpha__slow_tool \
+             is awaiting {SLOW_DELAY_MS}ms — a registry lock held across the slow await \
+             would serialize the session and make this timeout (D-007 / GOTCHA #16)",
+        );
+    common::assert_no_rpc_error(&echo_resp, "beta__echo_ok during alpha__slow_tool");
+    let echo_result = echo_resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("beta__echo_ok returned no result"));
+    if let Some(is_error) = echo_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "beta__echo_ok must forward successfully (real forward, not an error) — \
+             otherwise the lock discipline is not exercised"
+        );
+    }
+    let echo_text = result_text(&echo_result);
+    assert!(
+        echo_text.contains("non-serialized"),
+        "beta__echo_ok must echo the payload byte-faithfully; got: {echo_text:?}"
+    );
+
+    // The slow call must also eventually complete (no hang, no lost request).
+    let slow_resp = timeout(SPAWN_DEADLINE, child.wait_for_id(slow_id))
+        .await
+        .expect("alpha__slow_tool must also complete (no hang, no lost request)");
+    common::assert_no_rpc_error(&slow_resp, "alpha__slow_tool");
+    let slow_result = slow_resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("alpha__slow_tool returned no result"));
+    if let Some(is_error) = slow_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "alpha__slow_tool must forward successfully (real forward)"
+        );
+    }
+    let slow_text = result_text(&slow_result);
+    assert!(
+        slow_text.contains(&SLOW_DELAY_MS.to_string()),
+        "alpha__slow_tool result must pass through byte-faithfully; got: {slow_text:?}"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Regression guard (plan SC 13): static 3 meta-tools, lazy startup, byte-
+/// faithful invoke results, and reverse-traffic rejection remain true under a
+/// multi-upstream config. This re-asserts the Phase 0/1 guarantees in the
+/// Phase 2 multi-upstream context — the live multi-upstream discovery path
+/// must NOT leak into the downstream rmcp tools/list surface, and a real
+/// cross-upstream forward + reverse-traffic exchange must still work.
+///
+/// Combines: static tools/list (SC 13), lazy startup (SC 2 — re-asserted via
+/// the first list_tools spawning), byte-faithful invoke (SC 13), and reverse-
+/// traffic rejection (SC 13 — needs_sampling completes within deadline, not
+/// hung, GOTCHA #2). Stdout discipline is implicitly asserted by every wire
+/// test (the harness panics on a non-JSON stdout line).
+#[tokio::test]
+async fn multi_upstream_preserves_phase0_phase1_guarantees() {
+    let cfg = alpha_beta_gamma_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    // Static 3 meta-tools under a 3-upstream config.
+    let resp = common::list_tools(&mut child).await;
+    common::assert_no_rpc_error(&resp, "tools/list under 3-upstream config");
+    let tools = resp
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
+    exp::assert_exact_meta_tools(tools);
+
+    // Live discovery across all three upstreams: list_tools returns rows from
+    // alpha, beta, AND gamma (3 x 8 = 24 rows). Proves multi-upstream
+    // discovery composes without leaking into the static downstream surface.
+    let list = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(&mut child, "list_tools", serde_json::json!({})),
+    )
+    .await
+    .expect("list_tools under 3-upstream config must complete");
+    common::assert_no_rpc_error(&list, "list_tools 3-upstream");
+    let list_result = list
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("list_tools 3-upstream returned no result"));
+    if let Some(is_error) = list_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "list_tools must return the combined inventory, not an error"
+        );
+    }
+    let rows = parse_list_tools_rows(&list_result);
+    // Each upstream contributes the eight probe tools; total = 24 rows.
+    assert_eq!(
+        rows.len(),
+        PROBE_TOOL_NAMES.len() * 3,
+        "3-upstream list_tools must return 24 rows (3 servers x 8 tools); got {} rows",
+        rows.len()
+    );
+    // Every row's server field must be one of alpha/beta/gamma, and each
+    // server must appear.
+    let servers: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r.get("server").and_then(|s| s.as_str()).map(String::from))
+        .collect();
+    for expected in ["alpha", "beta", "gamma"] {
+        assert!(
+            servers.contains(expected),
+            "list_tools under 3-upstream config must include rows from `{expected}`; \
+             got servers: {:?}",
+            servers
+        );
+    }
+
+    // Byte-faithful invoke across a multi-upstream config: invoke beta__echo_ok
+    // and assert the payload round-trips unchanged (D-004).
+    let payload = "multi-upstream-byte-faithful-7a2c";
+    let echo = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            serde_json::json!({
+                "name": "beta__echo_ok",
+                "arguments": { "message": payload },
+            }),
+        ),
+    )
+    .await
+    .expect("beta__echo_ok must complete");
+    common::assert_no_rpc_error(&echo, "beta__echo_ok");
+    let echo_result = echo
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("beta__echo_ok returned no result"));
+    if let Some(is_error) = echo_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "beta__echo_ok must succeed (byte-faithful forward)"
+        );
+    }
+    let echo_text = result_text(&echo_result);
+    assert!(
+        echo_text.contains(payload),
+        "beta__echo_ok must round-trip the payload byte-faithfully (D-004); got: {echo_text:?}"
+    );
+
+    // Reverse-traffic rejection under a multi-upstream config: needs_sampling
+    // on alpha completes within the deadline (the aggregator rejects the
+    // sampling request, not a hang — GOTCHA #2). Proves the reverse-traffic
+    // handler works per-upstream, not just for the single Phase 1 upstream.
+    let rev = timeout(
+        Duration::from_secs(10),
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            serde_json::json!({
+                "name": "alpha__needs_sampling",
+                "arguments": {},
+            }),
+        ),
+    )
+    .await
+    .expect("alpha__needs_sampling must complete (reverse traffic handled, not hung)");
+    common::assert_no_rpc_error(&rev, "alpha__needs_sampling");
+    let rev_result = rev
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("alpha__needs_sampling returned no result"));
+    if let Some(is_error) = rev_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "alpha__needs_sampling must forward the probe's success result"
+        );
+    }
+
+    // Final static tools/list — still exactly the three meta-tools after the
+    // full multi-upstream exercise (no leak, no destabilization).
+    let final_list = common::list_tools(&mut child).await;
+    common::assert_no_rpc_error(&final_list, "final tools/list under 3-upstream config");
+    let final_tools = final_list
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
+    exp::assert_exact_meta_tools(final_tools);
+
+    child.into_guard().shutdown().await.ok();
+}
