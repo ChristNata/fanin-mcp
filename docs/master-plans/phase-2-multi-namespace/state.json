@@ -1,0 +1,29 @@
+{
+  "feature": "phase-2-multi-namespace",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "THOROUGH",
+  "current_step": "plan",
+  "steps": {
+    "plan": {
+      "status": "complete",
+      "at": "2026-06-26T00:00:00Z"
+    },
+    "test-create": {
+      "status": "pending",
+      "at": null
+    },
+    "implement": {
+      "status": "pending",
+      "at": null
+    },
+    "simplify": {
+      "status": "pending",
+      "at": null
+    },
+    "review": {
+      "status": "pending",
+      "at": null
+    }
+  }
+}
