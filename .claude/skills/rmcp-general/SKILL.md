@@ -13,7 +13,7 @@ description: >-
 
 fanin-mcp is an rmcp **server** (downstream, to CC/OC) and an rmcp **client**
 (upstream, to N proxied servers) in one process. This skill captures the rmcp
-specifics that base Rust competence does not cover. The repo's `AGG-MCP.md`
+specifics that base Rust competence does not cover. The repo's `docs/AGG-MCP.md`
 has fuller architecture; treat its code snippets as pseudocode (see below).
 
 ## The pin is law
@@ -23,7 +23,7 @@ builders, transports. The repo policy (D-015, GOTCHA #23):
 
 - `rmcp` is pinned **exactly** in `Cargo.toml` (`rmcp = "=x.y.z"`), and
   `Cargo.lock` is committed.
-- Every code snippet in `AGG-MCP.md` and the other design docs is
+- Every code snippet in `docs/AGG-MCP.md` and the other design docs is
   **pseudocode until verified against the pinned version.** Do not paste a
   doc snippet and trust it to compile.
 - When a signature in your memory fights the compiler, the compiler wins —

@@ -101,11 +101,16 @@ fanin-mcp/
 │   └── probe-server/         # In-repo mock MCP server (echo / error / slow / annotated) for CI
 ├── Cargo.toml
 ├── Cargo.lock                # committed
-├── docs/
+├── docs/                     # Obsidian vault (read/written by glasswing-mcp)
 │   ├── PRD.md
 │   ├── ARCHITECTURE.md
+│   ├── DECISIONS.md
+│   ├── GOTCHA.md
 │   ├── MVP.md
-│   └── AGG-MCP.md
+│   ├── AGG-MCP.md
+│   └── master-plans/         # Covenant plan workspace
+├── ROADMAP.md
+├── STACK.md
 ├── SECURITY.md
 ├── LICENSE-MIT
 ├── LICENSE-APACHE

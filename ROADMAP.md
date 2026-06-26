@@ -4,7 +4,7 @@ Status legend: 🔨 in progress · 📋 planned · 💭 exploring · 🚫 non-go
 
 ## v1.0 — MVP (🔨 ~12 working days)
 
-The shippable core. Full plan in [MVP.md](MVP.md); requirements in [PRD.md](PRD.md).
+The shippable core. Full plan in [MVP.md](docs/MVP.md); requirements in [PRD.md](docs/PRD.md).
 
 - Stdio MCP proxy: 3 meta-tools (`list_tools`, `get_tool_schema`, `invoke_tool`), static descriptions
 - Lazy upstream connections (stdio + Streamable HTTP), per-server init guards, non-serializing concurrency
@@ -18,7 +18,7 @@ The shippable core. Full plan in [MVP.md](MVP.md); requirements in [PRD.md](PRD.
 - 3-OS CI matrix, in-repo probe server fixture, `cargo audit`/`cargo deny`, token benchmark
 - Dual license (MIT OR Apache-2.0)
 
-**Exit criteria:** the full [MVP.md verification checklist](MVP.md#verification-checklist).
+**Exit criteria:** the full [MVP.md verification checklist](docs/MVP.md#verification-checklist).
 
 ## v1.1 — Capability & Comfort (📋)
 

@@ -35,26 +35,33 @@ probe-server fixture under `tests/probe-server/`. No workspace, no sub-crates.
 
 Plan scope: flat
 
-## Design canon
+## Design canon — the `docs/` vault
 
-The repo's design docs are binding. Read the relevant one before touching a
+`docs/` is an **Obsidian vault**, read and written by the `glasswing` MCP
+server. It is the project's knowledge store: the design corpus, the Covenant
+plan workspace (`docs/master-plans/`), and all future research / debugging /
+RCA notes live here. Prefer the `glasswing` tools to read and write vault
+notes; plain file reads still work. Standard markdown and `[[wikilinks]]` are
+both fine.
+
+The design docs are binding. Read the relevant one before touching a
 subsystem — they encode decisions already made, not suggestions:
 
-- **`DECISIONS.md`** — accepted ADRs (D-001..D-019). The *why* behind every
-  non-obvious choice. Diverging from one is a spec conflict to surface, not a
-  silent rewrite.
-- **`GOTCHA.md`** — the trap list (symptom → cause → fix). Items marked ✅ are
-  enforced by design/tests; do not "simplify" them away.
-- **`MVP.md`** — the phased implementation plan and verification checklist.
-- **`PRD.md` / `ARCHITECTURE.md` / `AGG-MCP.md`** — requirements and internal
-  architecture. AGG-MCP snippets are **pseudocode** until verified against the
-  rmcp pin.
-- **`STACK.md` / `ROADMAP.md` / `SECURITY.md`** — stack rationale, what is in
-  scope per version, and the threat model.
+- **`docs/DECISIONS.md`** — accepted ADRs (D-001..D-019). The *why* behind
+  every non-obvious choice. Diverging from one is a spec conflict to surface,
+  not a silent rewrite.
+- **`docs/GOTCHA.md`** — the trap list (symptom → cause → fix). Items marked ✅
+  are enforced by design/tests; do not "simplify" them away.
+- **`docs/MVP.md`** — the phased implementation plan and verification checklist.
+- **`docs/PRD.md` / `docs/ARCHITECTURE.md` / `docs/AGG-MCP.md`** — requirements
+  and internal architecture. AGG-MCP snippets are **pseudocode** until verified
+  against the rmcp pin.
+- **`STACK.md` / `ROADMAP.md` / `SECURITY.md`** (repo root, GitHub-facing) —
+  stack rationale, what is in scope per version, and the threat model.
 
 ## Binding project rules
 
-These are the sharp edges that bite first. The full set lives in `GOTCHA.md`.
+These are the sharp edges that bite first. The full set lives in `docs/GOTCHA.md`.
 
 1. **stdout is the MCP transport.** Once `serve(stdio())` runs, any `println!`
    to stdout corrupts the JSON-RPC stream. All output goes to stderr or the
@@ -95,3 +102,8 @@ These are the sharp edges that bite first. The full set lives in `GOTCHA.md`.
 - **Context7** (remote, credential-free) — current rmcp/crate docs on demand.
   The rmcp API shifts across versions; prefer Context7 over memory for rmcp
   signatures. Add `CONTEXT7_API_KEY` via `/update` for higher rate limits.
+- **glasswing** (local, credential-free) — Obsidian-vault read/write over the
+  `docs/` vault. Zero network calls; vault never leaves the machine. The vault
+  path is passed as a relative arg (`docs`), so it resolves against the session
+  CWD — the repo root in a normal session, the worktree root under
+  orchestration. Requires `npm install -g glasswing-mcp` on the host.
