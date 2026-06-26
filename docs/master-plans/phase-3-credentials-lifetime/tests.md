@@ -92,13 +92,13 @@ servers = ["<name>"]
 
 | # | Master Success Criterion | Test(s) |
 |---|---|---|
-| 1 | `credentials.rs` defines a server-scoped credential abstraction with keyring and env backends | `cred_store::credential_resolution_order_env_fallback_then_structured_error` (wire-level resolution-order proof); `cred_store::env_fallback_resolves_without_keyring` |
-| 2 | Credential resolution order: preferred backend → env fallback → structured error | `cred_store::credential_resolution_order_env_fallback_then_structured_error`; `cred_store::missing_credential_returns_structured_error_not_rpc_error` |
+| 1 | `credentials.rs` defines a server-scoped credential abstraction with keyring and env backends | `cred_store::credential_resolution_order_env_fallback_then_server_wide_fail_closed` (wire-level resolution-order + fail-closed proof); `cred_store::env_fallback_resolves_without_keyring` |
+| 2 | Credential resolution order: preferred backend → env fallback → structured error | `cred_store::credential_resolution_order_env_fallback_then_server_wide_fail_closed`; `cred_store::missing_credential_returns_structured_error_not_rpc_error` |
 | 3 | `cred set <server> <KEY>` stores a hidden-prompt value, no CLI arg carries the secret | `cred_store::cred_set_reads_secret_from_hidden_stdin_not_argv` (stdin pipe, no echo, exit 0) |
 | 4 | `cred list <server>` returns names only, never values | `cred_store::cred_list_emits_names_only_never_values` |
 | 5 | `cred rm <server> <KEY>` removes the key so later lookup cannot resolve it | `cred_store::cred_rm_makes_later_resolution_not_return_value` |
 | 6 | Keyring-backed round trip succeeds on hosts with an available keyring | `cred_store::keyring_round_trip_succeeds_when_keyring_available` (#[ignore] on keyring-less hosts) |
-| 7 | Env fallback works in a keyring-less/headless case | `cred_store::env_fallback_resolves_without_keyring`; `cred_store::credential_resolution_order_env_fallback_then_structured_error` |
+| 7 | Env fallback works in a keyring-less/headless case | `cred_store::env_fallback_resolves_without_keyring`; `cred_store::credential_resolution_order_env_fallback_then_server_wide_fail_closed` |
 | 8 | `${VAR}` interpolation resolves at spawn (keyring + env sources) | `cred_store::dollar_brace_interpolation_resolves_and_literal_values_pass_through` |
 | 9 | Each spawned upstream receives ONLY its own env vars; sibling + ambient not inherited | `cred_store::per_upstream_env_isolation_sibling_and_ambient_not_inherited` (D-010 least-privilege proof) |
 | 10 | Literal non-secret env values still reach the upstream unchanged | `cred_store::dollar_brace_interpolation_resolves_and_literal_values_pass_through` (literal-var assertion) |
@@ -128,7 +128,7 @@ servers = ["<name>"]
 | P1.4 | Keyring round trip on hosts with keyring; env fallback on headless | `cred_store::keyring_round_trip_succeeds_when_keyring_available` (ignored on headless); `cred_store::env_fallback_resolves_without_keyring` |
 | P1.5 | Cargo.toml keeps rmcp pinned, adds only Phase 3 deps | Structural — review verifies. No test asserts on Cargo.toml content. |
 | P2.1 | `${VAR}` resolves from keyring then env | `cred_store::dollar_brace_interpolation_resolves_and_literal_values_pass_through` |
-| P2.2 | Missing credentials → structured error naming server + variable, no secret | `cred_store::missing_credential_returns_structured_error_not_rpc_error` |
+| P2.2 | Missing credentials → structured error naming server + variable, no secret (server-wide fail-closed) | `cred_store::missing_credential_returns_structured_error_not_rpc_error` |
 | P2.3 | Spawned upstream receives exactly its configured env keys; no sibling credentials | `cred_store::per_upstream_env_isolation_sibling_and_ambient_not_inherited` |
 | P2.4 | Literal non-secret env values reach the upstream | `cred_store::dollar_brace_interpolation_resolves_and_literal_values_pass_through` |
 | P2.5 | Sentinel-redaction test proves sentinel absent from tracing, child stderr, upstream logs | `cred_store::sentinel_secret_redacted_from_tracing_stderr_and_upstream_logs` |
@@ -178,6 +178,36 @@ so a stub that returns the right shape without doing the work fails.
   aggregator's full env or shares sibling env would let the probe see the
   value — failing the assertion. The probe's `echo_env` tool is the
   observable: it reads the actual env of the spawned child.
+- **Resolution order + fail-closed is a side-effect assertion on the
+  SERVER-WIDE failure, not the per-call echo_env shape (Option A).**
+  `credential_resolution_order_env_fallback_then_server_wide_fail_closed`
+  splits into two independent servers: (1) a server whose `${VAR}` resolves
+  ONLY via process-env fallback — `echo_env` for that var returns the
+  resolved value byte-faithfully (preferred-backend → env-fallback ordering
+  delivers); (2) a SEPARATE server with a guaranteed-unresolvable
+  `${DEFINITELY_MISSING}` var — a GENERIC `echo_ok` call (NOT `echo_env`,
+  no matching `key` arg) returns the structured `credential_resolution_failed`
+  error (`isError: true`, names the server + the missing variable, carries
+  `code: "credential_resolution_failed"`, NO `${...}` literal, NO sibling
+  value). The generic-tool call is the load-bearing observable: the proxy is
+  name-level only and cannot know which tool needs which credential, so an
+  unresolvable configured placeholder must fail the WHOLE server, not just
+  the one tool that happens to read the env var. The old per-call-via-
+  `echo_env(key=<bad-lhs>)` shape (Option B / partial-resolve) is replaced —
+  a stub that records the bad LHS and only short-circuits `echo_env` lets a
+  generic `echo_ok` sail through to the probe and fails the `isError: true`
+  assertion.
+- **Missing-credential fail-closed is a side-effect assertion on the
+  generic-tool call, not the echo_env key match (Option A).**
+  `missing_credential_returns_structured_error_not_rpc_error` invokes
+  `echo_ok` (NOT `echo_env`, no matching `key` arg) on a server with an
+  unresolvable `${VAR}` and asserts the structured `credential_resolution_failed`
+  error (`isError: true`, names server + missing variable, `code:
+  "credential_resolution_failed"`, NO `${...}` literal, NOT a JSON-RPC
+  error). Generalized from the old `echo_env(key=env_name)` shape, which the
+  current Option B code satisfies via the per-key short-circuit; the
+  generic-tool call exposes the partial-resolve gap and forces the
+  server-wide fail-closed implementation.
 - **Sentinel-redaction is a side-effect assertion on the log sinks.**
   `sentinel_secret_redacted_from_tracing_stderr_and_upstream_logs` stores a
   sentinel, configures it as a resolved env value, triggers a lazy spawn
@@ -243,7 +273,7 @@ so a stub that returns the right shape without doing the work fails.
 
 | Test | Reason | Unblock trigger |
 |---|---|---|
-| `cred_store::keyring_round_trip_succeeds_when_keyring_available` | `#[ignore = "requires a usable OS keyring; re-enable on a host with a keyring daemon"]` | Re-enable on a host with a working OS keyring service (D-Bus Secret Service on Linux, Keychain on macOS, Credential Manager on Windows). The always-run path (`env_fallback_resolves_without_keyring`, `credential_resolution_order_env_fallback_then_structured_error`) covers the env-fallback half of SC 6/7 on every host. |
+| `cred_store::keyring_round_trip_succeeds_when_keyring_available` | `#[ignore = "requires a usable OS keyring; re-enable on a host with a keyring daemon"]` | Re-enable on a host with a working OS keyring service (D-Bus Secret Service on Linux, Keychain on macOS, Credential Manager on Windows). The always-run path (`env_fallback_resolves_without_keyring`, `credential_resolution_order_env_fallback_then_server_wide_fail_closed`) covers the env-fallback half of SC 6/7 on every host. |
 
 ## Coverage gaps & boundaries
 
@@ -331,8 +361,8 @@ landed, Phase 3 NOT yet built):
     - `per_upstream_env_isolation_sibling_and_ambient_not_inherited` — the
       current `process.rs` inherits the aggregator's full env (no
       least-privilege filtering), so the probe sees the ambient var.
-    - `credential_resolution_order_env_fallback_then_structured_error` —
-      no interpolation; the env-fallback value does not resolve.
+    - `credential_resolution_order_env_fallback_then_server_wide_fail_closed`
+      — no interpolation; the env-fallback value does not resolve.
     - `timeout_secs_wraps_upstream_call_and_returns_structured_error` — no
       timeout wrapping; the slow call completes at 3s with `isError: false`.
     - `slow_timed_out_call_does_not_block_concurrent_sibling` — no timeout
@@ -368,6 +398,41 @@ landed, Phase 3 NOT yet built):
   harness. The implementer turns each RED green by building the Phase 3
   logic in `src/credentials.rs`, `src/config.rs`, `src/registry.rs`,
   `src/process.rs`, and `src/main.rs`.
+
+### Resolution-model rewrite — Option A fail-closed (post-Phase-3-landed)
+
+The credential resolution model was decided: **fail-closed (Option A)**.
+The old `credential_resolution_order_env_fallback_then_structured_error`
+encoded the partial-resolve contract (Option B): one server with BOTH a
+resolvable var and a missing var, expecting that single server to spawn and
+deliver the resolvable var while the missing var returned a per-call
+structured error only when `echo_env(key=<bad-lhs>)` was invoked. That
+contradicts the decided fail-closed model — the proxy is name-level only and
+cannot know which tool needs which credential, so any unresolvable configured
+`${VAR}` must fail the WHOLE server.
+
+Two tests were rewritten to specify the new contract:
+
+- **`credential_resolution_order_env_fallback_then_structured_error`** →
+  renamed **`credential_resolution_order_env_fallback_then_server_wide_fail_closed`**.
+  Split into two INDEPENDENT servers: (1) env-fallback delivery (a server
+  whose `${VAR}` resolves ONLY via process-env fallback — `echo_env` returns
+  the value byte-faithfully); (2) fail-closed (a SEPARATE server with an
+  unresolvable `${DEFINITELY_MISSING}` var — a GENERIC `echo_ok` call returns
+  the structured `credential_resolution_failed` error).
+- **`missing_credential_returns_structured_error_not_rpc_error`** generalized
+  from `echo_env(key=env_name)` to a generic `echo_ok` call (no matching key
+  arg), so the failure must be server-wide, not gated on the `echo_env` tool
+  shape.
+
+**Expected RED against the current (Option B) code:** the current
+`registry.rs` records bad env LHS names at spawn and only short-circuits
+`echo_env(key=<bad-lhs>)` in `call_tool`. A generic `echo_ok` call sails
+through to the probe and returns a successful result (`isError: false`), so
+both rewritten tests fail the `isError: true` assertion — the clean,
+meaningful RED the implementer turns green by failing the whole server when
+any configured `${VAR}` is unresolvable. The env-fallback delivery half (1)
+still passes against the current code (env fallback already delivers).
 
 ### Oracle correction (post-implementation)
 

@@ -36,12 +36,6 @@ pub struct Registry {
     credential_choice: CredentialStoreChoice,
     entries: RwLock<HashMap<String, Arc<UpstreamEntry>>>,
     init_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// Per-server env LHS names that failed `${VAR}` resolution.
-    /// Populated at spawn time for any key whose value could not be resolved.
-    /// Later calls that target such a key (echo_env "key") return the stored
-    /// structured credential error. This allows a server to have a mixed
-    /// env map (some good, some bad) without failing the whole server.
-    bad_env: std::sync::Mutex<HashMap<String, HashMap<String, ToolError>>>,
 }
 
 impl Registry {
@@ -52,21 +46,7 @@ impl Registry {
             credential_choice,
             entries: RwLock::new(HashMap::new()),
             init_guards: Mutex::new(HashMap::new()),
-            bad_env: std::sync::Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Record (or overwrite) a bad env LHS for a server.
-    fn record_bad_env(&self, server: &str, lhs: String, err: ToolError) {
-        let mut map = self.bad_env.lock().expect("bad_env poisoned");
-        map.entry(server.to_string()).or_default().insert(lhs, err);
-    }
-
-    /// If the given env LHS name is known to be unresolvable for this server,
-    /// return the stored structured error. Used by call_tool for echo_env etc.
-    fn get_bad_env_error(&self, server: &str, lhs: &str) -> Option<ToolError> {
-        let map = self.bad_env.lock().expect("bad_env poisoned");
-        map.get(server).and_then(|m| m.get(lhs)).cloned()
     }
 
     /// Returns true if the server exists in the config.
@@ -105,26 +85,15 @@ impl Registry {
                 })?;
         let cred_choice = self.credential_choice;
 
-        // Per-key resolution (Phase 2). A server may declare a mix of good and bad
-        // env values. Good ones (and literals) are injected; bad ones are recorded
-        // so that later echo_env("key") for a bad LHS returns the structured error.
-        //
-        // IMPORTANT: a bad key must NOT fail the spawn. The child receives only the
-        // good subset. The structured error is returned later from call_tool when
-        // the caller targets the bad LHS (the echo_env contract).
+        // Fail-closed resolution: every configured env value is resolved before
+        // spawn. If any `${VAR}` is missing from the preferred credential backend
+        // and process-env fallback, the server is not spawned and every call to
+        // that server receives the same structured credential error.
         let store = crate::credentials::build_store(cred_choice);
         let mut resolved_env = HashMap::new();
         for (lhs, raw) in &server_config.env {
-            match crate::process::resolve_env_value(&*store, cred_choice, server, raw) {
-                Ok(v) => {
-                    resolved_env.insert(lhs.clone(), v);
-                }
-                Err(e @ ToolError::CredentialResolution { .. }) => {
-                    // Record; continue. Spawn must succeed for the good keys.
-                    self.record_bad_env(server, lhs.clone(), e);
-                }
-                Err(other) => return Err(other),
-            }
+            let resolved = crate::process::resolve_env_value(&*store, cred_choice, server, raw)?;
+            resolved_env.insert(lhs.clone(), resolved);
         }
 
         let entry = Arc::new(connect(server, server_config, &resolved_env).await?);
@@ -157,20 +126,6 @@ impl Registry {
                 server: server.to_string(),
                 tool: tool.to_string(),
             });
-        }
-
-        // Phase 2 per-key credential error short-circuit:
-        // When the test asks `echo_env` for an env LHS that could not be resolved,
-        // return the stored structured CredentialResolution error instead of
-        // letting the probe see a literal or an absent value.
-        if tool == "echo_env" {
-            if let Some(args) = &arguments {
-                if let Some(v) = args.get("key").and_then(|x| x.as_str()) {
-                    if let Some(err) = self.get_bad_env_error(server, v) {
-                        return Err(err);
-                    }
-                }
-            }
         }
 
         let mut params = CallToolRequestParams::new(tool.to_string());

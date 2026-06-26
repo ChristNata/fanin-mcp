@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "THOROUGH",
-  "current_step": "review",
+  "current_step": "push",
   "steps": {
     "plan": {
       "status": "complete",
@@ -22,8 +22,8 @@
       "at": "2026-06-27T03:30:00Z"
     },
     "review": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T05:00:00Z"
     }
   }
 }

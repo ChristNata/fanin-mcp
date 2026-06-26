@@ -59,8 +59,8 @@ enum Command {
     /// Serve the aggregator over stdio (default when no subcommand is given).
     Serve,
 
-    /// Credential management stub. Never touch keyring or secrets here yet
-    /// (D-010, GOTCHA #18/#19/#22).
+    /// Manage credentials with `cred set`, `cred list`, and `cred rm`.
+    /// Secrets are read from a hidden prompt and never printed.
     Cred {
         #[command(subcommand)]
         action: CredAction,
@@ -173,9 +173,20 @@ fn run_cred(action: CredAction, choice: crate::credentials::CredentialStoreChoic
     use crate::credentials::{build_store, prompt_for_secret};
 
     let store = build_store(choice);
+    let backend = credential_backend_name(choice);
 
     match action {
         CredAction::Set { server, key } => {
+            if choice == crate::credentials::CredentialStoreChoice::Env {
+                tracing::error!(
+                    backend,
+                    server = %server,
+                    key = %key,
+                    "cred set rejected: env credential store is read-only; set the process environment variable or choose --credential-store keyring"
+                );
+                return ExitCode::FAILURE;
+            }
+
             // Hidden prompt. Prompt text may go to terminal; secret itself must not.
             let secret = match prompt_for_secret(&format!("Enter secret for {server}/{key}: ")) {
                 Ok(s) => s,
@@ -195,17 +206,14 @@ fn run_cred(action: CredAction, choice: crate::credentials::CredentialStoreChoic
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    // On hosts without a usable keyring backend the preferred store may
-                    // reject the set. For CLI UX and to keep the Phase-1 `cred set`
-                    // exit-0 contract (see tests.md notes), we still succeed the command
-                    // without leaking the secret or fabricating any non-keyring storage.
-                    tracing::warn!(
+                    tracing::error!(
                         error = %e,
+                        backend,
                         server = %server,
                         key = %key,
-                        "preferred credential store rejected set; exiting success (no secret leaked)"
+                        "cred set failed: selected credential store rejected the write; no secret was stored. Use a working keyring backend or set the process environment variable as fallback"
                     );
-                    ExitCode::SUCCESS
+                    ExitCode::FAILURE
                 }
             }
         }
@@ -226,16 +234,35 @@ fn run_cred(action: CredAction, choice: crate::credentials::CredentialStoreChoic
                 }
             }
         }
-        CredAction::Rm { server, key } => match store.delete(&server, &key) {
-            Ok(()) => {
-                tracing::info!(server = %server, key = %key, "credential removed (if present)");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                tracing::error!(error = %e, server = %server, key = %key, "cred rm failed");
+        CredAction::Rm { server, key } => {
+            if choice == crate::credentials::CredentialStoreChoice::Env {
+                tracing::error!(
+                    backend,
+                    server = %server,
+                    key = %key,
+                    "cred rm rejected: env credential store is read-only; remove the process environment variable or choose --credential-store keyring"
+                );
                 ExitCode::FAILURE
+            } else {
+                match store.delete(&server, &key) {
+                    Ok(()) => {
+                        tracing::info!(server = %server, key = %key, "credential removed (if present)");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, backend, server = %server, key = %key, "cred rm failed");
+                        ExitCode::FAILURE
+                    }
+                }
             }
-        },
+        }
+    }
+}
+
+fn credential_backend_name(choice: crate::credentials::CredentialStoreChoice) -> &'static str {
+    match choice {
+        crate::credentials::CredentialStoreChoice::Keyring => "keyring",
+        crate::credentials::CredentialStoreChoice::Env => "env",
     }
 }
 

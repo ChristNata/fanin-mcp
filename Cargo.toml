@@ -66,16 +66,13 @@ tracing-subscriber = "0.3"
 # is declared explicitly here.
 schemars = "0.8"
 
-# Credential storage (OS keychain) and hidden prompt for `cred set`.
-# keyring v3 ships no backend unless a platform feature is enabled.
-keyring = { version = "3", features = [
-    "apple-native",
-    "windows-native",
-    "sync-secret-service",
-] }
+# Hidden prompt for `cred set`.
 rpassword = "7"
 
 [target.'cfg(windows)'.dependencies]
+# keyring v3 ships no backend unless a platform feature is enabled.
+keyring = { version = "3", features = ["windows-native"] }
+
 # windows — direct Win32 Job Object calls for hard-kill process-tree
 # containment. process-wrap's rmcp integration spawns correctly, but the job
 # handle must be held explicitly by fanin-mcp so kernel KILL_ON_JOB_CLOSE is
@@ -85,6 +82,12 @@ windows = { version = "0.62.2", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
 
 [dev-dependencies]
 # Explicit dev-deps so the integration test binary is self-contained per

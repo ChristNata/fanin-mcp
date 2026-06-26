@@ -6,8 +6,12 @@
 //! - `${VAR}` interpolation at spawn (SC 8, SC 10).
 //! - per-upstream env isolation (SC 9 — D-010 least-privilege).
 //! - sentinel-redaction across tracing + child stderr + upstream logs (SC 11).
-//! - resolution order: preferred backend -> env fallback -> structured error
-//!   (SC 1, 2).
+//! - resolution order: preferred backend -> env fallback -> fail-closed
+//!   structured error (SC 1, 2). The proxy is name-level only — it cannot
+//!   know which tool needs which credential — so any unresolvable configured
+//!   `${VAR}` is a SERVER-WIDE failure: the server is not spawned partially
+//!   authenticated, and EVERY `invoke_tool` targeting it returns the
+//!   structured `credential_resolution_failed` error (Option A / fail-closed).
 //!
 //! All tests are wire-level / CLI-level. Tests reference NO `src/` symbols;
 //! they depend only on `tokio`, `serde_json`, `tempfile` (dev-deps), and
@@ -647,11 +651,25 @@ async fn sentinel_secret_redacted_from_tracing_stderr_and_upstream_logs() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// Master SC 2 (resolution order) + missing-credential error shape: when a
-/// configured `${VAR}` cannot be resolved (no keyring entry, no env var),
-/// the upstream call returns a structured tool-level error naming the server
-/// and variable, NOT a JSON-RPC error, and the error text does NOT include
-/// the secret or a secret-looking value.
+/// Master SC 2 (Option A — fail-closed) + missing-credential error shape: when
+/// a configured `${VAR}` cannot be resolved (no keyring entry, no env var),
+/// the WHOLE server fails — every `invoke_tool` to ANY tool on that server
+/// returns the structured `credential_resolution_failed` error naming the
+/// server and the missing variable, NOT a JSON-RPC error, with NO secret
+/// value and NO `${...}` literal.
+///
+/// This test invokes a GENERIC tool (`echo_ok`, NOT `echo_env` and NOT a
+/// matching `key` argument) to prove the failure is SERVER-WIDE, not gated on
+/// the `echo_env` tool shape or a matching key. The proxy is name-level only;
+/// it cannot know which tool needs which credential, so an unresolvable
+/// configured placeholder must fail the server, not just the one tool that
+/// happens to read the env var.
+///
+/// Against the CURRENT code (Option B / partial-resolve), this test FAILS RED:
+/// the current code only short-circuits `echo_env(key=<bad-lhs>)`; a generic
+/// `echo_ok` call sails through to the probe and returns success. The
+/// implementer turns it green by failing the whole server when any configured
+/// `${VAR}` is unresolvable.
 #[tokio::test]
 async fn missing_credential_returns_structured_error_not_rpc_error() {
     let server = format!("srv-{}", fx::phase3_unique_seq());
@@ -671,37 +689,40 @@ async fn missing_credential_returns_structured_error_not_rpc_error() {
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
+    // A GENERIC tool call (echo_ok, NOT echo_env, no matching key arg) must
+    // return the structured credential_resolution_failed error — the failure
+    // is server-wide, not gated on the echo_env tool shape.
     let resp = timeout(
         RESOLVE_DEADLINE,
         common::call_tool(
             &mut child,
             "invoke_tool",
             serde_json::json!({
-                "name": format!("{server}__echo_env"),
-                "arguments": { "key": env_name },
+                "name": format!("{server}__echo_ok"),
+                "arguments": { "message": "should never reach the probe" },
             }),
         ),
     )
     .await
-    .expect("echo_env (missing credential) must complete within deadline");
-    common::assert_no_rpc_error(&resp, "echo_env missing credential");
+    .expect("echo_ok (missing credential) must complete within deadline");
+    common::assert_no_rpc_error(&resp, "echo_ok missing credential");
 
     let result = resp
         .get("result")
         .cloned()
-        .unwrap_or_else(|| panic!("echo_env missing credential returned no result"));
+        .unwrap_or_else(|| panic!("echo_ok missing credential returned no result"));
 
     // The result must be a structured error (isError: true) — NOT a
-    // JSON-RPC error (asserted above) and NOT a successful echo of the
-    // literal `${...}` string.
+    // JSON-RPC error (asserted above) and NOT a successful echo_ok result
+    // (the probe must never receive the call).
     let is_error = result
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     assert!(
         is_error,
-        "missing credential must return isError: true, not a successful echo; \
-         result: {result:?}"
+        "missing credential must fail the WHOLE server: a generic echo_ok call must return \
+         isError: true, not a successful result (Option A fail-closed); result: {result:?}"
     );
 
     let err = parse_error_json(&result);
@@ -711,15 +732,26 @@ async fn missing_credential_returns_structured_error_not_rpc_error() {
         Some(server.as_str()),
         "missing-credential error must name the server; got: {err:?}"
     );
-    // The error must carry a code (the exact code is the implementer's
-    // choice; it must NOT be a JSON-RPC error).
+    // The error must carry the credential_resolution_failed code (NOT a
+    // JSON-RPC error).
+    let code = err.get("code").and_then(|c| c.as_str());
     assert!(
-        err.get("code").and_then(|c| c.as_str()).is_some(),
+        code.is_some(),
         "missing-credential error must carry a structured code; got: {err:?}"
+    );
+    assert_eq!(
+        code,
+        Some("credential_resolution_failed"),
+        "missing-credential error code must be exactly `credential_resolution_failed`; got: {err:?}"
+    );
+    // The error must name the missing variable.
+    let text = result_text(&result);
+    assert!(
+        text.contains(&missing_key),
+        "missing-credential error must name the missing variable `{missing_key}`; got: {text:?}"
     );
     // The error text must NOT include the unresolved `${...}` literal as a
     // secret-looking value.
-    let text = result_text(&result);
     assert!(
         !text.contains("${"),
         "missing-credential error must NOT include the unresolved ${{...}} literal; got: {text:?}"
@@ -728,46 +760,88 @@ async fn missing_credential_returns_structured_error_not_rpc_error() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// Master SC 1 + SC 2: `src/credentials.rs` defines a server-scoped credential
-/// abstraction with keyring and env backends, and resolution order is
-/// preferred backend -> env fallback -> structured error. The wire-level
-/// observable is the env-fallback resolution path plus the missing-credential
-/// structured error. This test is the explicit resolution-order proof: a
-/// value available ONLY via env fallback resolves, and a value available via
-/// NEITHER backend returns the structured error.
+/// Master SC 1 + SC 2 (Option A — fail-closed): `src/credentials.rs` defines a
+/// server-scoped credential abstraction with keyring and env backends, and
+/// resolution order is preferred backend -> env fallback -> SERVER-WIDE
+/// structured error. The proxy is name-level only — it cannot know which tool
+/// needs which credential — so any configured `${VAR}` that resolves via
+/// NEITHER the preferred backend NOR process-env fallback fails the WHOLE
+/// server: the server is NOT spawned partially authenticated, and EVERY
+/// `invoke_tool` targeting it returns the structured `credential_resolution_failed`
+/// error (`CallToolResult { isError: true }`, naming the server + the missing
+/// variable, no secret value, never a JSON-RPC error).
+///
+/// This is the explicit resolution-order proof, split into two INDEPENDENT
+/// servers so the fail-closed assertion is not contaminated by a sibling's
+/// resolvable var:
+///
+/// 1. **Env-fallback delivery** — a server whose `${VAR}` resolves ONLY via
+///    process-env fallback (set on the aggregator process, no keyring). The
+///    probe's `echo_env` for that var returns the resolved value byte-
+///    faithfully. This proves preferred-backend -> env-fallback ordering
+///    still delivers when the var is resolvable.
+/// 2. **Missing credential fails the server (fail-closed)** — a SEPARATE
+///    server with a `${DEFINITELY_MISSING}` var. An `invoke_tool` to a GENERIC
+///    tool (`echo_ok`, NOT `echo_env` — no matching `key` argument) returns
+///    the structured `credential_resolution_failed` error. The failure must
+///    NOT depend on the tool being `echo_env` or on a matching `key` arg —
+///    it must bite for a generic tool, proving the server-wide fail-closed
+///    behavior.
+///
+/// Against the CURRENT code (Option B / partial-resolve), assertion (2) FAILS
+/// RED: the current code records the bad LHS and only short-circuits
+/// `echo_env(key=<bad-lhs>)`; a generic `echo_ok` call sails through to the
+/// probe and returns success. The implementer turns (2) green by failing the
+/// whole server when any configured `${VAR}` is unresolvable.
 #[tokio::test]
-async fn credential_resolution_order_env_fallback_then_structured_error() {
-    let server = format!("srv-{}", fx::phase3_unique_seq());
+async fn credential_resolution_order_env_fallback_then_server_wide_fail_closed() {
+    // (1) Env-fallback delivery — a server whose `${VAR}` resolves ONLY via
+    // process-env fallback.
+    let server_ok = format!("srv-ok-{}", fx::phase3_unique_seq());
     let env_only_key = fx::phase3_env_var_name("ENVONLY");
     let env_only_val = "env-fallback-value";
-    let missing_key = format!("DEFINITELY_MISSING_{}", fx::phase3_unique_seq());
     let env_name_ok = fx::phase3_env_var_name("OK");
-    let env_name_missing = fx::phase3_env_var_name("MISS");
 
     // Set the env-only var on the aggregator process so the spawned
-    // aggregator child inherits it; env fallback resolves it.
+    // aggregator child inherits it; env fallback resolves it. No keyring.
     std::env::set_var(&env_only_key, env_only_val);
+
+    // (2) Missing credential — a SEPARATE server with a guaranteed-unresolvable
+    // `${VAR}`. This server must fail-closed for EVERY tool, not just echo_env.
+    let server_bad = format!("srv-bad-{}", fx::phase3_unique_seq());
+    let missing_key = format!("DEFINITELY_MISSING_{}", fx::phase3_unique_seq());
+    let env_name_missing = fx::phase3_env_var_name("MISS");
+
+    // Ensure the missing key is absent from the process env as well as any
+    // keyring, so neither backend can resolve it.
     std::env::remove_var(&missing_key);
 
     let cfg = fx::Phase3ConfigBuilder::new()
         .server(
-            fx::Phase3ServerEntry::new(server.clone())
-                .env(env_name_ok.clone(), format!("${{{env_only_key}}}"))
+            fx::Phase3ServerEntry::new(server_ok.clone())
+                .env(env_name_ok.clone(), format!("${{{env_only_key}}}")),
+        )
+        .server(
+            fx::Phase3ServerEntry::new(server_bad.clone())
                 .env(env_name_missing.clone(), format!("${{{missing_key}}}")),
         )
-        .namespace(fx::NamespaceEntry::new("default", [server.as_str()]))
+        .namespace(fx::NamespaceEntry::new(
+            "default",
+            [server_ok.as_str(), server_bad.as_str()],
+        ))
         .write();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
-    // The env-fallback value must resolve.
+    // (1) The env-fallback value must resolve byte-faithfully. This assertion
+    // passes against the current code (env fallback already delivers).
     let ok_resp = timeout(
         RESOLVE_DEADLINE,
         common::call_tool(
             &mut child,
             "invoke_tool",
             serde_json::json!({
-                "name": format!("{server}__echo_env"),
+                "name": format!("{server_ok}__echo_env"),
                 "arguments": { "key": env_name_ok },
             }),
         ),
@@ -781,33 +855,81 @@ async fn credential_resolution_order_env_fallback_then_structured_error() {
         "env-fallback resolution must deliver the value to the upstream; got: {ok_text:?}"
     );
 
-    // The missing value must produce a structured error, not a literal echo.
+    // (2) A GENERIC tool call (echo_ok, NOT echo_env, no matching key arg) to
+    // the server with the unresolvable `${VAR}` must return the structured
+    // `credential_resolution_failed` error — proving the failure is
+    // SERVER-WIDE, not gated on the echo_env tool shape or a matching key.
     let miss_resp = timeout(
         RESOLVE_DEADLINE,
         common::call_tool(
             &mut child,
             "invoke_tool",
             serde_json::json!({
-                "name": format!("{server}__echo_env"),
-                "arguments": { "key": env_name_missing },
+                "name": format!("{server_bad}__echo_ok"),
+                "arguments": { "message": "should never reach the probe" },
             }),
         ),
     )
     .await
-    .expect("echo_env (missing) must complete");
-    common::assert_no_rpc_error(&miss_resp, "echo_env missing");
+    .expect("echo_ok on fail-closed server must complete");
+    common::assert_no_rpc_error(&miss_resp, "echo_ok on fail-closed server");
     let miss_result = miss_resp
         .get("result")
         .cloned()
-        .unwrap_or_else(|| panic!("echo_env missing returned no result"));
+        .unwrap_or_else(|| panic!("echo_ok on fail-closed server returned no result"));
+
+    // The result must be a structured error (isError: true) — NOT a JSON-RPC
+    // error (asserted above) and NOT a successful echo_ok result (the probe
+    // must never receive the call).
     let is_error = miss_result
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     assert!(
         is_error,
-        "unresolvable credential must return isError: true (structured error), not a literal echo; \
-         result: {miss_result:?}"
+        "unresolvable credential must fail the WHOLE server: a generic echo_ok call must return \
+         isError: true, not a successful result (Option A fail-closed); result: {miss_result:?}"
+    );
+
+    // The structured error must name the server and the missing variable,
+    // carry a code, and contain NO secret value and NO `${...}` literal.
+    let err = parse_error_json(&miss_result);
+    assert_eq!(
+        err.get("server").and_then(|s| s.as_str()),
+        Some(server_bad.as_str()),
+        "credential_resolution_failed error must name the server; got: {err:?}"
+    );
+    let code = err.get("code").and_then(|c| c.as_str());
+    assert!(
+        code.is_some(),
+        "credential_resolution_failed error must carry a structured code; got: {err:?}"
+    );
+    assert_eq!(
+        code,
+        Some("credential_resolution_failed"),
+        "credential_resolution_failed error code must be exactly `credential_resolution_failed`; \
+         got: {err:?}"
+    );
+    // The error must name the missing variable (the `${VAR}` that could not be
+    // resolved), proving the failure is the configured placeholder, not a
+    // tool-level or transport error.
+    let text = result_text(&miss_result);
+    assert!(
+        text.contains(&missing_key),
+        "credential_resolution_failed error must name the missing variable `{missing_key}`; \
+         got: {text:?}"
+    );
+    assert!(
+        !text.contains("${"),
+        "credential_resolution_failed error must NOT include the unresolved ${{...}} literal; \
+         got: {text:?}"
+    );
+    // No secret value is present anywhere (the missing var was never resolved
+    // to anything, but this guards against a future leak).
+    assert!(
+        !text.contains(env_only_val),
+        "credential_resolution_failed error must NOT leak a sibling server's resolved value; \
+         got: {text:?}"
     );
 
     std::env::remove_var(&env_only_key);
