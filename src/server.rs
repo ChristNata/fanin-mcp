@@ -181,7 +181,7 @@ impl Aggregator {
                 if !namespace.is_tool_allowed(&server, &tool.name) {
                     continue; // discovery-time filter: denied tool never emitted
                 }
-                let disp_name = sanitize_upstream_text(&tool.name);
+                let disp_name = sanitize_upstream_identifier(&tool.name);
                 let disp_desc = sanitize_upstream_text(&tool.description.unwrap_or_default());
                 rows.push(serde_json::json!({
                     "server": server,
@@ -255,10 +255,10 @@ impl Aggregator {
             }
             .as_result();
         };
-        // Sanitize only upstream-authored metadata strings inside the schema
-        // (title/description/$comment/examples/enum display strings).
-        // Structural keys (type, properties, required, property keys, etc.)
-        // are left untouched so the returned JSON remains a valid schema shape.
+        // Sanitize only upstream-authored annotation strings inside the schema
+        // (title/description/$comment/markdownDescription). Validation values
+        // (enum, const, default, examples, pattern, etc.) are left untouched so
+        // the returned JSON remains semantically faithful to the upstream schema.
         let sanitized_schema =
             sanitize_schema_metadata(&serde_json::Value::Object((*found.input_schema).clone()));
         CallToolResult::success(vec![Content::text(sanitized_schema.to_string())])
@@ -368,24 +368,21 @@ fn parse_server_tool(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-/// Sanitize upstream-authored text (tool names, descriptions, schema metadata strings)
+/// Sanitize upstream-authored display text (descriptions, schema annotation strings)
 /// for LLM-visible display only.
 ///
-/// - Strips every C0 control character (U+0000–U+001F) and DEL (U+007F),
-///   including `\n`, `\r`, `\t`, VT, FF. Each is replaced by a single ASCII space.
-/// - The result is always a single logical line (no newlines or control chars).
+/// - Replaces C0, C1, DEL, Unicode separators, bidi controls, BOM, and common
+///   zero-width format chars with a single ASCII space.
+/// - The result is always a single logical line free of those code points.
 /// - After stripping, length is capped to ~100 Unicode characters (scalar values),
 ///   never splitting a multibyte UTF-8 sequence.
 /// - This is DISPLAY-ONLY. It is never applied to `invoke_tool` arguments or
-///   result content (see D-004 / GOTCHA #4). Dispatch and namespace checks
-///   continue to use the real upstream tool name from the registry inventory.
+///   result content (see D-004 / GOTCHA #4).
 fn sanitize_upstream_text(s: &str) -> String {
-    // Replace every C0 control and DEL with space → single-line, control-free.
     let stripped: String = s
         .chars()
         .map(|c| {
-            let u = c as u32;
-            if u <= 0x1F || u == 0x7F {
+            if should_neutralize_upstream_char(c) {
                 ' '
             } else {
                 c
@@ -399,14 +396,44 @@ fn sanitize_upstream_text(s: &str) -> String {
     stripped.trim().chars().take(CAP).collect()
 }
 
+/// Sanitize an upstream identifier for LLM-visible row keys without changing
+/// dispatch identity by length-capping it.
+fn sanitize_upstream_identifier(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if should_neutralize_upstream_char(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn should_neutralize_upstream_char(c: char) -> bool {
+    let u = c as u32;
+    matches!(
+        u,
+        0x0000..=0x001F // C0 controls
+            | 0x007F // DEL
+            | 0x0080..=0x009F // C1 controls
+            | 0x200B..=0x200D // zero-width space/joiners
+            | 0x2028..=0x2029 // line / paragraph separators
+            | 0x202A..=0x202E // bidi embeddings / overrides
+            | 0x2066..=0x2069 // bidi isolates
+            | 0xFEFF // BOM / zero-width no-break space
+    )
+}
+
 /// Recursively sanitize string values that appear under upstream-authored
 /// schema metadata keys, while preserving the JSON structure required by
 /// JSON Schema consumers (type, properties, required, property keys, etc.).
 ///
-/// Targeted metadata keys (per plan): "title", "description", "$comment",
-/// "examples", "enum". For the array-valued keys we sanitize the string
-/// *elements* they contain. All other values and keys are left structurally
-/// identical; only the *contents* of those specific metadata strings change.
+/// Targeted annotation keys: "title", "description", "$comment", and
+/// "markdownDescription". Validation and structural values are left verbatim;
+/// only the contents of those annotation strings change.
 fn sanitize_schema_metadata(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(map) => {
@@ -432,27 +459,13 @@ fn sanitize_schema_metadata(v: &serde_json::Value) -> serde_json::Value {
 fn is_schema_metadata_key(k: &str) -> bool {
     matches!(
         k,
-        "title" | "description" | "$comment" | "examples" | "enum"
+        "title" | "description" | "$comment" | "markdownDescription"
     )
 }
 
 fn sanitize_metadata_value(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::String(s) => serde_json::Value::String(sanitize_upstream_text(s)),
-        serde_json::Value::Array(arr) => {
-            // examples / enum: sanitize any string members; recurse non-strings
-            let out: Vec<_> = arr
-                .iter()
-                .map(|item| {
-                    if let serde_json::Value::String(s) = item {
-                        serde_json::Value::String(sanitize_upstream_text(s))
-                    } else {
-                        sanitize_schema_metadata(item)
-                    }
-                })
-                .collect();
-            serde_json::Value::Array(out)
-        }
         other => sanitize_schema_metadata(other),
     }
 }

@@ -168,7 +168,7 @@ impl Registry {
         match timeout(effective, call_fut).await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(e)) => {
-                // TransportClosed → UpstreamDisconnected (distinct from live-call failure).
+                // Transport-layer death → UpstreamDisconnected (distinct from live-call failure).
                 // No map lock held across the await (D-007).
                 Err(map_service_error(e, server, tool))
             }
@@ -199,8 +199,8 @@ impl Registry {
     ///   **no** `tools` RwLock held across the await (D-007 / GOTCHA #16).
     /// - On successful refetch, briefly acquires the per-entry `tools` write
     ///   lock only to overwrite the cached vec.
-    /// - On refetch failure (transport closed / dead upstream) returns
-    ///   `ToolError::UpstreamDisconnected` (no silent reconnect).
+    /// - On refetch failure, restores dirty=true before returning the error so
+    ///   a later read retries instead of serving stale inventory.
     /// - The `server` name is used only for error construction.
     ///
     /// The caller must have already dropped the registry `entries` map lock
@@ -228,7 +228,10 @@ impl Registry {
         // Also do NOT hold entry.tools across the await.
         let fresh = match entry.service.peer().list_all_tools().await {
             Ok(list) => list,
-            Err(e) => return Err(map_service_error(e, server, "")), // empty tool: matches prior observable for ensure_fresh
+            Err(e) => {
+                entry.dirty.store(true, Ordering::Relaxed);
+                return Err(map_service_error(e, server, "")); // empty tool: matches prior observable for ensure_fresh
+            }
         };
 
         // Briefly hold only the per-entry tools lock to install the fresh list.
@@ -245,7 +248,10 @@ impl Registry {
 /// from ordinary call failures. Preserves the exact observable strings
 /// and the empty-tool convention used by `ensure_fresh`.
 fn map_service_error(e: ServiceError, server: &str, tool: &str) -> ToolError {
-    if matches!(e, ServiceError::TransportClosed) {
+    if matches!(
+        e,
+        ServiceError::TransportClosed | ServiceError::TransportSend(_)
+    ) {
         ToolError::UpstreamDisconnected {
             server: server.to_string(),
             tool: tool.to_string(),

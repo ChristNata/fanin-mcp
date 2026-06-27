@@ -21,10 +21,13 @@ use crate::common;
 /// `spawn_grandchild` (hard-kill orphan proof), bringing the total to 10.
 /// Phase 4 adds `poison_meta`, `poison_schema`, `mutate_tools`, and
 /// `self_pid` (sanitization + list_changed + mid-session-death proofs),
-/// bringing the static total to 14. The runtime-added `added_tool` (toggled
-/// by `mutate_tools`) is NOT in this static set; it appears only after
-/// `mutate_tools` adds it.
-const PROBE_TOOL_NAMES: [&str; 14] = [
+/// bringing the static total to 14. The review-fix pass adds
+/// `toggle_long_tool` (F2 long-name toggle) and `poison_validation`
+/// (F3 annotation-only schema sanitization), bringing the static total to
+/// 16. The runtime-added `added_tool` (toggled by `mutate_tools`) and
+/// `long_named_tool` (F2 fixture, toggled by `toggle_long_tool`) are NOT in
+/// this static set; they appear only after their respective toggles.
+const PROBE_TOOL_NAMES: [&str; 16] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -39,6 +42,8 @@ const PROBE_TOOL_NAMES: [&str; 14] = [
     "poison_schema",
     "mutate_tools",
     "self_pid",
+    "toggle_long_tool",
+    "poison_validation",
 ];
 
 fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -94,8 +99,8 @@ async fn probe_exposes_exactly_eight_named_tools() {
 
     assert_eq!(
         tools.len(),
-        14,
-        "probe must expose exactly 14 tools, got {}: {tools:?}",
+        16,
+        "probe must expose exactly 16 tools, got {}: {tools:?}",
         tools.len()
     );
     for name in PROBE_TOOL_NAMES {

@@ -29,8 +29,12 @@ const ACL_DEADLINE: Duration = Duration::from_secs(15);
 /// The exact set of probe tool names (mirrors discovery.rs). Phase 3 extends
 /// the probe with `echo_env` and `spawn_grandchild`, bringing the total to
 /// 10. Phase 4 adds `poison_meta`, `poison_schema`, `mutate_tools`, and
-/// `self_pid`, bringing the static total to 14.
-const PROBE_TOOL_NAMES: [&str; 14] = [
+/// `self_pid`, bringing the static total to 14. The review-fix pass adds
+/// `toggle_long_tool` (F2) and `poison_validation` (F3), bringing the static
+/// total to 16. The runtime-added `added_tool` (`mutate_tools`) and
+/// `long_named_tool` (F2 fixture, `toggle_long_tool`) are NOT in this static
+/// set.
+const PROBE_TOOL_NAMES: [&str; 16] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -45,6 +49,8 @@ const PROBE_TOOL_NAMES: [&str; 14] = [
     "poison_schema",
     "mutate_tools",
     "self_pid",
+    "toggle_long_tool",
+    "poison_validation",
 ];
 
 /// Extract the text content of a list_tools result as a JSON array of rows.

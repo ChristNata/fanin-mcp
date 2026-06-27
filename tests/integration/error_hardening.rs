@@ -475,3 +475,53 @@ async fn needs_sampling_completes_without_hanging() {
 
     child.into_guard().shutdown().await.ok();
 }
+
+// ---- Review-fix coverage (F4) ----------------------------------------------
+//
+// F4 — send-side broken pipe misclassified as `upstream_call_failed`. The
+// THOROUGH review (F4) found `map_service_error` matches only
+// `ServiceError::TransportClosed`. A child that dies such that the failure
+// is FIRST observed on the WRITE side surfaces as
+// `ServiceError::TransportSend(...)` → reported as `upstream_call_failed`
+// instead of the Phase 4 `upstream_disconnected`.
+
+/// Review fix F4 — send-side death → `upstream_disconnected` (robustness,
+/// best-effort). NOT DETERMINISTIC wire-level: whether a killed upstream's
+/// next call surfaces as `ServiceError::TransportClosed` (the transport
+/// worker already detected the EOF/closure) vs `ServiceError::TransportSend`
+/// (the send fails before the worker notices) is a race between the OS
+/// pipe-closure propagation and the aggregator's next `call_tool` send. On
+/// Windows the pipe behavior differs from Unix. The existing
+/// `dead_upstream_returns_structured_error_and_sibling_stays_callable` test
+/// covers the `TransportClosed` path (it happens to surface that way on this
+/// host/timing); this stub would cover the `TransportSend` path, but forcing
+/// the send-side observation deterministically requires injecting into the
+/// transport (a hook to make the send fail before the worker detects
+/// closure), which is below the wire-level surface.
+///
+/// Unblock trigger: a wire-level harness that can deterministically force the
+/// send-side failure surface (e.g. a transport wrapper that injects a broken
+/// pipe on the next send without closing the read side first), OR a unit-level
+/// test against `map_service_error` once that function is extracted/testable.
+/// Until then, the F4 code fix (also map `TransportSend` from an established
+/// upstream operation to `UpstreamDisconnected`) is verified by the existing
+/// `TransportClosed` path test plus the code review — the send-side path is
+/// the documented gap.
+#[tokio::test]
+#[ignore = "F4: send-side broken pipe surfaces as TransportSend vs TransportClosed \
+            non-deterministically (OS pipe-closure race, Windows/Unix differ). The existing \
+            dead_upstream_returns_structured_error_and_sibling_stays_callable test covers the \
+            TransportClosed path; this stub covers the TransportSend path. Unblock: a wire-level \
+            transport wrapper that forces send-side failure, or a unit test against \
+            map_service_error once extracted. Reason: no flaky test."]
+async fn f4_send_side_death_returns_upstream_disconnected_not_call_failed() {
+    // Stub: the deterministic wire-level sequence would be:
+    //   1. spawn aggregator with probe upstream, discover (lazy spawn).
+    //   2. kill the probe PID.
+    //   3. RACE: wait just long enough that the OS has closed the pipe but the
+    //      aggregator's transport worker has NOT yet detected the EOF, then
+    //      call invoke_tool so the SEND fails first → TransportSend.
+    //   4. assert the structured error code is `upstream_disconnected`.
+    // Step 3 is a race we cannot make deterministic without a transport hook.
+    // Left ignored with the reason + unblock trigger above.
+}

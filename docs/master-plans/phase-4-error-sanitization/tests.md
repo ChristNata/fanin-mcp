@@ -444,3 +444,215 @@ Against the current (pre-Phase-4) tree, the run-and-fail state is:
   contexts, or peer APIs must be verified against the pin; the
   `phase4_guard::rmcp_remains_pinned_exactly_at_1_8_0` test and the Phase 0
   `pinning.rs` test both enforce this.
+
+## Review-fix coverage (F1–F5)
+
+The THOROUGH review (`review.md`) surfaced five targeted findings against
+the landed Phase 4 implementation. This section records the test-creator's
+coverage for each: the new test(s) that lock the CORRECTED behavior, the
+RED/ignored status against the current tree, and the honest-unknowns (F2
+registerability, F4/F5 determinism). The new tests are the contract for
+the debugger; they are RED now and turn GREEN when the debugger lands the
+fixes. Existing green tests are unchanged in behavior (the only edit to
+existing tests is the probe tool-count constant 14 → 16, a factual
+correction matching the extended probe fixture).
+
+### Probe-fixture additions (review-fix pass)
+
+- **`poison_meta` description extended (F1).** The description now embeds
+  `U+2028` (line sep), `U+2029` (paragraph sep), `U+0085` (NEL, C1),
+  `U+0080` (pad, C1), `U+202E` (RLO bidi override), `U+200B` (ZWSP), and
+  `U+FEFF` (BOM) — placed EARLY (within the first 100 chars) so the
+  aggregator's ~100-char description cap does NOT truncate them. A C0-only
+  strip leaves them in the LLM-visible row text; the F1 test catches that.
+- **`toggle_long_tool` + dynamic `long_named_tool` (F2).** A new static
+  tool `toggle_long_tool` toggles a dynamic `long_named_tool` whose REAL
+  name is 120 chars (`long_named_tool_` + 104 `a`s) — longer than the
+  aggregator's ~100-char description cap, under rmcp 1.8.0's 128-char
+  registration ceiling, valid `[A-Za-z0-9_.-]`. The long-named tool is
+  DYNAMIC (off by default) so the existing static-set discovery tests stay
+  green against the current (pre-F2-fix) tree; the F2 test toggles it ON.
+  `toggle_long_tool` emits `notifications/tools/list_changed` so the
+  aggregator's next `list_tools` deterministically refetches (the F2
+  contract is name dispatchability, but the advertisement depends on the
+  inventory refreshing — emitting list_changed makes it deterministic).
+  Dispatch routes the long-named tool to `echo_ok` so the round-trip is
+  observable.
+- **`poison_validation` (F3).** A new static tool whose `input_schema`
+  carries BOTH annotation fields (`title`, `description`) with control
+  chars AND validation fields (`enum: ["clean", "wei\u{0007}rd"]`,
+  `default: "def\u{000A}ault"`, `const: "const\u{000B}val"`) carrying
+  control-bearing string values. The F3 test asserts `get_tool_schema`
+  returns the validation values VERBATIM while the annotations are
+  sanitized.
+
+The probe now exposes **16 static tools** (14 Phase 4 + `toggle_long_tool`
++ `poison_validation`). The `PROBE_TOOL_NAMES` constant is updated 14 → 16
+in `probe.rs`, `discovery.rs`, `multi_upstream.rs`, `namespace_acl.rs` —
+a factual correction, not a weakening. The runtime-added `added_tool`
+(`mutate_tools`) and `long_named_tool` (`toggle_long_tool`) are NOT in
+the static set; they appear only after their respective toggles.
+
+### Coverage map — review findings
+
+| Finding | Test | Status (current tree) | Locks |
+|---|---|---|---|
+| F1 — Unicode separators / C1 / bidi / zero-width stripped | `sanitization::f1_list_tools_strips_unicode_separators_c1_bidi_zero_width` | RED | The `list_tools` row description for `poison_meta` contains NONE of U+2028/U+2029/U+0085/U+0080/U+202E/U+200B/U+FEFF (and is still single-line + C0-free + capped). RED because the current `sanitize_upstream_text` strips only C0+DEL. |
+| F2 — Long upstream tool name stays dispatchable | `sanitization::f2_long_named_tool_advertised_full_and_dispatchable` | RED | `list_tools` advertises the FULL 120-char real name (not truncated to 100) in the row `tool`/`name` field, AND `invoke_tool` using that advertised key SUCCEEDS (round-trip, not `unknown_tool`). RED because the current code caps the name field at 100 → truncated → dispatch fails. |
+| F3 — Schema validation data preserved; only annotations sanitized | `sanitization::f3_get_tool_schema_preserves_validation_data_sanitizes_only_annotations` | RED | `get_tool_schema` returns `enum` members, `default`, `const` VERBATIM (control chars intact) WHILE `title`/`description` are sanitized (control-free). RED because the current `is_schema_metadata_key` includes `enum` → sanitizes its members → corrupts validation data. |
+| F4 — Send-side death → `upstream_disconnected` | `error_hardening::f4_send_side_death_returns_upstream_disconnected_not_call_failed` | IGNORED | Stub. NOT deterministic wire-level (OS pipe-closure race; Windows/Unix differ). The existing `dead_upstream_returns_structured_error_and_sibling_stays_callable` covers the `TransportClosed` path; F4 covers the `TransportSend` path. |
+| F5 — Failed refetch retries (no stale cache) | `list_changed::f5_failed_refetch_retries_does_not_serve_stale_inventory` | RED | After a failed post-`list_changed` refetch (probe killed), the SECOND `list_tools` returns `upstream_disconnected` (retried), NOT a successful stale inventory. RED because `ensure_fresh` does `dirty.swap(false)` before the await → on failure dirty stays false → the second call fast-paths and serves stale. |
+
+### F2 registerability outcome
+
+rmcp 1.8.0 registers tool names up to **128 chars** (`validate_tool_name`
+rejects names > 128 or with invalid chars; the `Tool::new` constructor does
+NOT enforce a length cap — it stores the name as `Cow<'static, str>` and
+emits a tracing warning via `validate_and_warn_tool_name` for non-conforming
+names, but registration proceeds). The F2 fixture's 120-char name
+(`long_named_tool_` + 104 `a`s) is within the 128-char ceiling and a valid
+`[A-Za-z0-9_.-]` identifier, so the probe registers it cleanly (verified:
+the probe's `debug_assert!`s in `long_named_tool_tool` pass, and
+`tools/list` from the probe returns the 120-char name). **The finding is
+NOT moot** — the cap CAN truncate a registerable name, and the F2 test is
+RED against the current tree (the aggregator caps the `tool`/`name` field
+at 100 → the row advertises a 100-char truncation → `invoke_tool` with the
+truncated key fails `unknown_tool`). The fix: the `tool`/`name` dispatch-key
+field must carry the REAL upstream tool name (control-strip defensively,
+but NO cap — names are identifiers, not prose); apply the ~100 cap ONLY to
+`description`.
+
+### F4 determinism decision
+
+NOT deterministic wire-level. Whether a killed upstream's next call surfaces
+as `ServiceError::TransportClosed` (the transport worker already detected
+the EOF/closure) vs `ServiceError::TransportSend(...)` (the send fails
+before the worker notices) is a race between the OS pipe-closure propagation
+and the aggregator's next `call_tool` send. Windows pipe behavior differs
+from Unix. Forcing the send-side observation deterministically requires
+injecting into the transport (a hook to make the send fail before the
+worker detects closure), which is below the wire-level surface. Per the
+doctrine (no flaky test), F4 is an `#[ignore = "..."]` stub with a concrete
+reason and unblock trigger (a wire-level transport wrapper that forces
+send-side failure, OR a unit test against `map_service_error` once that
+function is extracted/testable). The F4 code fix (also map `TransportSend`
+from an established upstream operation to `UpstreamDisconnected`) is
+verified by the existing `TransportClosed` path test plus the code review;
+the send-side path is the documented gap.
+
+### F5 determinism decision
+
+DETERMINISTIC wire-level. The F5 sequence forces the post-`list_changed`
+refetch to fail by killing the probe upstream AFTER it emits `list_changed`
+(so the aggregator marks dirty) but BEFORE the next `list_tools` (so the
+refetch fails). The first `list_tools` after the kill returns
+`upstream_disconnected` (the refetch fails). The SECOND `list_tools` is the
+load-bearing assertion: under the F5 bug it fast-paths (dirty=false) and
+serves the stale pre-mutate inventory as a SUCCESS; under the fix it
+retries (dirty restored) and returns `upstream_disconnected` again. The
+assertion (second call returns an error, not a stale success) is
+deterministic — no race, no timing window. The kill is owned by the test
+(simulating an external crash between the notification and the refetch);
+the aggregator's containment layer is NOT involved.
+
+### Side-effect assertions (review-fix tests)
+
+- **F1 is a side-effect assertion on the row text.** The test asserts the
+  `list_tools` row description for `poison_meta` contains NONE of the F1
+  code points — observable in the LLM-visible row text, not just a return
+  value. A sanitizer that left U+2029/U+0085/U+202E/U+200B in the description
+  fails the per-codepoint assertion. The code points are placed within the
+  first 100 chars so the description cap does NOT hide them.
+- **F2 is a side-effect assertion on the advertised name + the dispatch.**
+  The test asserts `list_tools` advertises the FULL 120-char name in the
+  row `tool`/`name` field (observable row text), AND that `invoke_tool`
+  using that advertised key SUCCEEDS (the round-trip is the observable
+  effect). A proxy that truncated the name to 100 fails the advertised-name
+  assertion; a proxy that used the truncated name as the call key fails
+  the round-trip assertion (`unknown_tool`).
+- **F3 is a side-effect assertion on the schema JSON.** The test parses
+  `get_tool_schema`'s text content as JSON and asserts the `enum`/`default`/
+  `const` values are VERBATIM (control chars intact) while `title`/
+  `description` are control-free. A sanitizer that touched `enum` (the
+  current `is_schema_metadata_key` includes it) fails the verbatim
+  assertion; a sanitizer that touched `default`/`const` would fail too
+  (pinned for the future).
+- **F5 is a side-effect assertion on the stale-cache behavior.** The test
+  kills the probe (the dead PROCESS is the oracle), triggers `list_changed`,
+  kills the probe, and asserts the SECOND `list_tools` after the failed
+  refetch returns `upstream_disconnected` (retried) — NOT a successful
+  stale inventory. A registry that cleared dirty before the await and did
+  not restore it on failure serves the stale inventory as a success and
+  fails the `isError` assertion.
+
+### Deferred tests (review-fix pass)
+
+- **F4** — `error_hardening::f4_send_side_death_returns_upstream_disconnected_not_call_failed`
+  is `#[ignore]`d. Reason: send-side broken pipe surfaces as `TransportSend`
+  vs `TransportClosed` non-deterministically (OS pipe-closure race;
+  Windows/Unix differ). The existing
+  `dead_upstream_returns_structured_error_and_sibling_stays_callable`
+  covers the `TransportClosed` path. Unblock trigger: a wire-level
+  transport wrapper that forces send-side failure, OR a unit test against
+  `map_service_error` once that function is extracted/testable.
+
+No other review-fix test is `#[ignore]`d. F1, F2, F3, F5 are RED wire-level
+tests against the current tree (the contract for the debugger).
+
+### Run-and-fail confirmation (review-fix pass)
+
+The suite compiles clean (`cargo build --tests` — zero warnings),
+`cargo fmt --all -- --check` is CLEAN, `cargo clippy --all-targets` is
+CLEAN (zero warnings).
+
+Against the current (post-Phase-4, pre-review-fix) tree, the run-and-fail
+state is:
+
+- **4 new review-fix tests total** (1 in `error_hardening.rs` — F4 ignored;
+  3 in `sanitization.rs` — F1, F2, F3 RED; 1 in `list_changed.rs` — F5 RED).
+  F4 is the only `#[ignore]`.
+- **`cargo test --test integration` (current tree): 99 passed, 4 failed
+  RED, 4 ignored.** The 4 RED failures are exactly the review-fix behaviors:
+  - `sanitization::f1_list_tools_strips_unicode_separators_c1_bidi_zero_width`
+    — the current `sanitize_upstream_text` strips only C0+DEL, leaving
+    U+2029/U+0085/U+202E/U+200B in the row description.
+  - `sanitization::f2_long_named_tool_advertised_full_and_dispatchable`
+    — the current code caps the `tool`/`name` field at 100, so the row
+    advertises a 100-char truncation of the 120-char real name, and
+    `invoke_tool` with the truncated key fails `unknown_tool`.
+  - `sanitization::f3_get_tool_schema_preserves_validation_data_sanitizes_only_annotations`
+    — the current `is_schema_metadata_key` includes `enum`, so the
+    `enum` member `"wei\u{0007}rd"` is sanitized to `"wei rd"` (control
+    →space), corrupting the validation data.
+  - `list_changed::f5_failed_refetch_retries_does_not_serve_stale_inventory`
+    — the current `ensure_fresh` does `dirty.swap(false)` before the await,
+    so on refetch failure dirty stays false; the second `list_tools`
+    fast-paths and serves the stale pre-mutate inventory as a success.
+- The 4 ignored are the 3 Phase 0/3 carried ignores (manual E2E + keyring
+  round-trip on headless hosts) + F4 (send-side non-determinism).
+- All 99 previously-green tests STILL PASS (the only edit to existing tests
+  is the probe tool-count constant 14 → 16, a factual correction; the
+  `list_tools_returns_probe_tool_rows` count assertion 14 → 16; the
+  `multi_upstream` 3-server count `PROBE_TOOL_NAMES.len() * 3` with the
+  updated comment "48 rows (3 servers x 16 tools)"). No behavioral
+  assertion is weakened.
+- **The red is meaningful:** every RED test fails on a review-fix behavior
+  assertion (Unicode separator survival, name truncation, enum
+  corruption, stale-cache serve), not on a compile error, a missing
+  symbol, or a malformed harness. The debugger turns each RED green by
+  landing the F1–F5 fixes in `src/server.rs` (extend the strip set; uncap
+  the name field; narrow `is_schema_metadata_key` to annotations only)
+  and `src/registry.rs` (restore dirty on refetch failure; also map
+  `TransportSend` to `UpstreamDisconnected` for F4).
+
+### Per-module inventory (review-fix pass)
+
+| Module | Tests (review-fix additions) |
+|---|---|
+| `sanitization` (Phase 4) | 5 (existing) + 3 (F1, F2, F3) = 8 |
+| `error_hardening` (Phase 4) | 3 (existing) + 1 (F4 ignored) = 4 (1 ignored) |
+| `list_changed` (Phase 4) | 2 (existing) + 1 (F5) = 3 |
+| `phase4_guard` (Phase 4) | 5 (unchanged) |
+| **Phase 4 total** | **15 (existing) + 5 (review-fix) = 20** (1 ignored) |
+| Phase 0/1/2/3 modules (behavior unchanged; probe count corrected 14 → 16) | 99 (3 ignored) |
+| **Grand total** | **119** (4 ignored) |

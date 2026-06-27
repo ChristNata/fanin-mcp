@@ -27,8 +27,12 @@ const DISCOVER_DEADLINE: Duration = Duration::from_secs(15);
 /// The exact set of probe tool names (mirrors `tests/integration/probe.rs`).
 /// Phase 3 extends the probe with `echo_env` and `spawn_grandchild`, bringing
 /// the total to 10. Phase 4 adds `poison_meta`, `poison_schema`,
-/// `mutate_tools`, and `self_pid`, bringing the static total to 14.
-const PROBE_TOOL_NAMES: [&str; 14] = [
+/// `mutate_tools`, and `self_pid`, bringing the static total to 14. The
+/// review-fix pass adds `toggle_long_tool` (F2) and `poison_validation` (F3),
+/// bringing the static total to 16. The runtime-added `added_tool`
+/// (`mutate_tools`) and `long_named_tool` (F2 fixture, `toggle_long_tool`)
+/// are NOT in this static set.
+const PROBE_TOOL_NAMES: [&str; 16] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -43,6 +47,8 @@ const PROBE_TOOL_NAMES: [&str; 14] = [
     "poison_schema",
     "mutate_tools",
     "self_pid",
+    "toggle_long_tool",
+    "poison_validation",
 ];
 
 /// Helper: spawn the aggregator with the canonical Phase 1 config and
@@ -96,7 +102,7 @@ fn parse_list_tools_rows(result: &Value) -> Vec<Value> {
 }
 
 /// Master criterion 6 / P4.SC1: `list_tools` meta-tool returns the probe
-/// server's tool rows for the active namespace. The fourteen probe tool names
+/// server's tool rows for the active namespace. The sixteen probe tool names
 /// must all appear in the returned rows.
 #[tokio::test]
 async fn list_tools_returns_probe_tool_rows() {
@@ -143,7 +149,7 @@ async fn list_tools_returns_probe_tool_rows() {
     assert_eq!(
         tool_names.len(),
         PROBE_TOOL_NAMES.len(),
-        "list_tools must return exactly the fourteen probe tool rows; got {tool_names:?}"
+        "list_tools must return exactly the sixteen probe tool rows; got {tool_names:?}"
     );
 
     child.into_guard().shutdown().await.ok();
@@ -151,8 +157,8 @@ async fn list_tools_returns_probe_tool_rows() {
 
 /// Master criterion 6 / P4.SC2: `list_tools` with a specific configured
 /// server returns only that server's rows. Passing `server: "probe"` must
-/// return the same ten rows (the only configured server); the filter must
-/// not drop any.
+/// return the same sixteen rows (the only configured server); the filter
+/// must not drop any.
 #[tokio::test]
 async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
     let mut child = phase1_child().await;
@@ -176,7 +182,7 @@ async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
     let rows = parse_list_tools_rows(&result);
 
     // Every row must belong to the `probe` server (if the row carries a
-    // `server` field). The tool set is still the fourteen probe tools.
+    // `server` field). The tool set is still the sixteen probe tools.
     for row in &rows {
         if let Some(srv) = row.get("server").and_then(|s| s.as_str()) {
             assert_eq!(
@@ -197,7 +203,7 @@ async fn list_tools_filtered_by_server_returns_only_that_server_rows() {
     assert_eq!(
         tool_names.len(),
         PROBE_TOOL_NAMES.len(),
-        "filtered list_tools for the only configured server must still return fourteen rows"
+        "filtered list_tools for the only configured server must still return sixteen rows"
     );
 
     child.into_guard().shutdown().await.ok();

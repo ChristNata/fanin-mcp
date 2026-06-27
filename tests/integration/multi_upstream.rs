@@ -51,8 +51,12 @@ const PROOF_DEADLINE: Duration = Duration::from_millis(400);
 /// The exact set of probe tool names (mirrors `tests/integration/discovery.rs`).
 /// Phase 3 extends the probe with `echo_env` and `spawn_grandchild`, bringing
 /// the total to 10. Phase 4 adds `poison_meta`, `poison_schema`,
-/// `mutate_tools`, and `self_pid`, bringing the static total to 14.
-const PROBE_TOOL_NAMES: [&str; 14] = [
+/// `mutate_tools`, and `self_pid`, bringing the static total to 14. The
+/// review-fix pass adds `toggle_long_tool` (F2) and `poison_validation` (F3),
+/// bringing the static total to 16. The runtime-added `added_tool`
+/// (`mutate_tools`) and `long_named_tool` (F2 fixture, `toggle_long_tool`)
+/// are NOT in this static set.
+const PROBE_TOOL_NAMES: [&str; 16] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -67,6 +71,8 @@ const PROBE_TOOL_NAMES: [&str; 14] = [
     "poison_schema",
     "mutate_tools",
     "self_pid",
+    "toggle_long_tool",
+    "poison_validation",
 ];
 
 /// Build a two-upstream (alpha + beta) config with a `default` namespace that
@@ -538,11 +544,11 @@ async fn multi_upstream_preserves_phase0_phase1_guarantees() {
         );
     }
     let rows = parse_list_tools_rows(&list_result);
-    // Each upstream contributes the fourteen probe tools; total = 42 rows.
+    // Each upstream contributes the sixteen probe tools; total = 48 rows.
     assert_eq!(
         rows.len(),
         PROBE_TOOL_NAMES.len() * 3,
-        "3-upstream list_tools must return 42 rows (3 servers x 14 tools); got {} rows",
+        "3-upstream list_tools must return 48 rows (3 servers x 16 tools); got {} rows",
         rows.len()
     );
     // Every row's server field must be one of alpha/beta/gamma, and each
