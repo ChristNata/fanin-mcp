@@ -1,0 +1,67 @@
+[graph]
+all-features = true
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = [
+    # Anti-stack: fanin-mcp is a stdio-native proxy, not a web server.
+    { name = "actix-web", reason = "web framework is outside the product stack" },
+    { name = "axum", reason = "web framework is outside the product stack" },
+    { name = "hyper-server", reason = "HTTP server is outside the product stack" },
+    { name = "poem", reason = "web framework is outside the product stack" },
+    { name = "rocket", reason = "web framework is outside the product stack" },
+    { name = "warp", reason = "web framework is outside the product stack" },
+
+    # Anti-stack: no database or ORM in the runtime proxy.
+    { name = "diesel", reason = "database/ORM is outside the product stack" },
+    { name = "rusqlite", reason = "database is outside the product stack" },
+    { name = "sea-orm", reason = "database/ORM is outside the product stack" },
+    { name = "sqlx", reason = "database is outside the product stack" },
+
+    # Anti-stack: no plugin loader or OpenTelemetry runtime.
+    { name = "libloading", reason = "plugin loading is outside the product stack" },
+    { name = "opentelemetry", reason = "OpenTelemetry is outside the product stack" },
+]
+
+# Current unavoidable duplicate transitive crates. These are explicit so new
+# duplicate versions still fail the gate.
+skip = [
+    { name = "schemars", version = "0.8.22" },
+    { name = "schemars_derive", version = "0.8.22" },
+    { name = "windows-sys", version = "0.59.0" },
+    { name = "windows-sys", version = "0.60.2" },
+    { name = "windows-targets", version = "0.52.6" },
+    { name = "windows_x86_64_gnu", version = "0.52.6" },
+    { name = "windows_x86_64_msvc", version = "0.52.6" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+unused-allowed-license = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

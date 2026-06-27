@@ -4,11 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use process_wrap::tokio::CommandWrap;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
 #[cfg(windows)]
 use process_wrap::tokio::KillOnDrop;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use rmcp::transport::child_process::TokioChildProcess;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -23,7 +25,7 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 #[cfg(windows)]
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 use crate::config::ServerConfig;
 use crate::credentials::{CredentialStore, CredentialStoreChoice};
@@ -133,6 +135,91 @@ type LogKey = (PathBuf, String);
 
 static LOG_WRITERS: OnceLock<Mutex<HashMap<LogKey, mpsc::Sender<String>>>> = OnceLock::new();
 
+/// Retained process-tree containment for the fanin-mcp process itself.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum ProcessTreeGuard {
+    #[cfg(windows)]
+    Windows(WindowsSelfJobGuard),
+    #[cfg(not(windows))]
+    None,
+}
+
+/// Installs process-tree containment for descendants of fanin-mcp itself.
+pub fn contain_current_process_tree() -> Result<ProcessTreeGuard, std::io::Error> {
+    #[cfg(windows)]
+    {
+        WindowsSelfJobGuard::assign_current_process().map(ProcessTreeGuard::Windows)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ProcessTreeGuard::None)
+    }
+}
+
+/// Windows Job Object handle retained for fanin-mcp's whole process tree.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsSelfJobGuard {
+    job: HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsSelfJobGuard {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsSelfJobGuard {}
+
+#[cfg(windows)]
+impl WindowsSelfJobGuard {
+    fn assign_current_process() -> Result<Self, std::io::Error> {
+        // SAFETY: Creating an unnamed Job Object has no aliasing requirements;
+        // the returned owned handle is closed on every error path or in Drop.
+        let job = unsafe { CreateJobObjectW(None, None) }.map_err(std::io::Error::other)?;
+
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        // SAFETY: `info` points to a valid JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        // for the duration of the call, and the byte length matches the type.
+        let set_result = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as _,
+                std::mem::size_of_val(&info)
+                    .try_into()
+                    .expect("JOBOBJECT_EXTENDED_LIMIT_INFORMATION size fits DWORD"),
+            )
+        };
+        if let Err(error) = set_result {
+            // SAFETY: `job` is an owned handle created above and not used after
+            // this close on the error path.
+            unsafe { CloseHandle(job) }.ok();
+            return Err(std::io::Error::other(error));
+        }
+
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle for this
+        // process; AssignProcessToJobObject does not take ownership of it.
+        let assign_result = unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) };
+        if let Err(error) = assign_result {
+            // SAFETY: `job` is an owned handle created above and not used after
+            // this close on the error path.
+            unsafe { CloseHandle(job) }.ok();
+            return Err(std::io::Error::other(error));
+        }
+
+        Ok(Self { job })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsSelfJobGuard {
+    fn drop(&mut self) {
+        // SAFETY: `self.job` is an owned Job Object handle and Drop runs once.
+        unsafe { CloseHandle(self.job) }.ok();
+    }
+}
+
 /// Spawn an upstream stdio child and capture its stderr to the configured log.
 ///
 /// Phase 2: least-privilege env injection (env_clear + only this server's resolved vars)
@@ -166,19 +253,18 @@ pub fn spawn_stdio_transport(
         cmd.env(key, value);
     }
 
-    // Phase 4: wrap via process-wrap so Unix children live in a process
-    // session. On Windows, rmcp does spawn through process-wrap, but the job
-    // handle must be retained explicitly by fanin-mcp; see
-    // `WindowsJobGuard::assign_to_process` below.
-    //
-    // Windows: KillOnDrop preserves rmcp's normal drop cleanup; the kernel
-    // KILL_ON_JOB_CLOSE hard-kill path is carried by the explicit guard.
-    // Unix: ProcessSession (setsid) creates a new session+group; killing the
-    // session leader's group reaches all descendants.
+    install_linux_parent_death_signal(&mut cmd)?;
+
+    // Phase 5: process-wrap's Windows JobObject wrapper creates the child
+    // suspended, assigns it to a kill-on-close Job Object, then resumes it.
+    // That closes the old post-spawn AssignProcessToJobObject race. Unix keeps
+    // ProcessSession for graceful group teardown; Linux additionally installs
+    // PR_SET_PDEATHSIG above so a hard-killed parent takes the child with it.
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(windows)]
     {
         wrapped.wrap(KillOnDrop);
+        wrapped.wrap(JobObject);
     }
     #[cfg(unix)]
     {
@@ -191,14 +277,80 @@ pub fn spawn_stdio_transport(
         TokioChildProcess::builder(wrapped).stderr(Stdio::null())
     };
     let (transport, stderr) = builder.spawn()?;
-    let containment = ContainmentGuard::for_transport(&transport)?;
     if let (Some(stderr), Some(log_file)) = (stderr, config.log_file.as_ref()) {
         spawn_stderr_log_task(server_name.to_string(), PathBuf::from(log_file), stderr);
     }
     Ok(SpawnedTransport {
         transport,
-        containment,
+        containment: ContainmentGuard::Retained,
     })
+}
+
+/// Spawn a long-lived descendant used by the Phase 5 immediate-startup
+/// containment test.
+pub fn spawn_immediate_descendant(
+    marker_path: &Path,
+) -> Result<ImmediateDescendantGuard, std::io::Error> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg(crate::IMMEDIATE_DESCENDANT_SENTINEL)
+        .arg(marker_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    install_linux_parent_death_signal(&mut cmd)?;
+
+    let mut wrapped = CommandWrap::from(cmd);
+    #[cfg(windows)]
+    {
+        wrapped.wrap(KillOnDrop);
+        wrapped.wrap(JobObject);
+    }
+    #[cfg(unix)]
+    {
+        wrapped.wrap(ProcessSession);
+    }
+
+    let child = wrapped.spawn()?;
+    Ok(ImmediateDescendantGuard { child })
+}
+
+/// Retains the process containment handle for the immediate test descendant.
+pub struct ImmediateDescendantGuard {
+    child: Box<dyn ChildWrapper>,
+}
+
+impl ImmediateDescendantGuard {
+    /// Returns the spawned descendant PID.
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_parent_death_signal(cmd: &mut Command) -> Result<(), std::io::Error> {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs in the child after fork and before exec. The
+    // closure only calls the async-signal-safe `prctl` syscall and constructs
+    // an io::Error from errno if it fails; it does not touch shared locks.
+    unsafe {
+        cmd.pre_exec(|| {
+            let rc = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_linux_parent_death_signal(_cmd: &mut Command) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 /// Spawn result plus the OS containment handle that must outlive the service.
@@ -212,114 +364,15 @@ pub struct SpawnedTransport {
 /// Platform process-tree containment retained alongside the upstream service.
 #[derive(Debug)]
 pub enum ContainmentGuard {
-    #[cfg(windows)]
-    Windows(WindowsJobGuard),
-    #[cfg(not(windows))]
-    None,
+    Retained,
 }
 
 impl ContainmentGuard {
-    fn for_transport(transport: &TokioChildProcess) -> Result<Self, std::io::Error> {
-        #[cfg(windows)]
-        {
-            let pid = transport
-                .id()
-                .ok_or_else(|| std::io::Error::other("upstream child pid unavailable"))?;
-            WindowsJobGuard::assign_to_process(pid).map(Self::Windows)
-        }
-
-        #[cfg(not(windows))]
-        {
-            let _ = transport;
-            Ok(Self::None)
-        }
-    }
-
     /// Returns true while the platform containment guard is retained.
     pub fn is_retained(&self) -> bool {
         match self {
-            #[cfg(windows)]
-            Self::Windows(_guard) => true,
-            #[cfg(not(windows))]
-            Self::None => true,
+            Self::Retained => true,
         }
-    }
-}
-
-/// Windows Job Object handle retained for kernel kill-on-close containment.
-#[cfg(windows)]
-#[derive(Debug)]
-pub struct WindowsJobGuard {
-    job: HANDLE,
-}
-
-#[cfg(windows)]
-unsafe impl Send for WindowsJobGuard {}
-#[cfg(windows)]
-unsafe impl Sync for WindowsJobGuard {}
-
-#[cfg(windows)]
-impl WindowsJobGuard {
-    fn assign_to_process(pid: u32) -> Result<Self, std::io::Error> {
-        // SAFETY: Creating an unnamed Job Object has no aliasing requirements;
-        // the returned owned handle is closed on every error path or in Drop.
-        let job = unsafe { CreateJobObjectW(None, None) }.map_err(std::io::Error::other)?;
-
-        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-        // SAFETY: `info` points to a valid JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-        // for the duration of the call, and the byte length matches the type.
-        let set_result = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as _,
-                std::mem::size_of_val(&info)
-                    .try_into()
-                    .expect("JOBOBJECT_EXTENDED_LIMIT_INFORMATION size fits DWORD"),
-            )
-        };
-        if let Err(error) = set_result {
-            // SAFETY: `job` is an owned handle created above and not used after
-            // this close on the error path.
-            unsafe { CloseHandle(job) }.ok();
-            return Err(std::io::Error::other(error));
-        }
-
-        // SAFETY: Opening a process by PID does not dereference Rust memory;
-        // the returned owned handle is closed after assignment.
-        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) }
-            .map_err(|error| {
-                // SAFETY: `job` is an owned handle created above and not used
-                // after this close on the error path.
-                unsafe { CloseHandle(job) }.ok();
-                std::io::Error::other(error)
-            })?;
-
-        // SAFETY: `job` and `process` are valid owned handles. Assignment does
-        // not outlive either handle; the kernel keeps the process in the job
-        // while the retained job handle remains open.
-        let assign_result = unsafe { AssignProcessToJobObject(job, process) };
-        // SAFETY: `process` is an owned handle opened above and is not used
-        // after being closed.
-        unsafe { CloseHandle(process) }.ok();
-        if let Err(error) = assign_result {
-            // SAFETY: `job` is an owned handle created above and not used after
-            // this close on the error path.
-            unsafe { CloseHandle(job) }.ok();
-            return Err(std::io::Error::other(error));
-        }
-
-        Ok(Self { job })
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsJobGuard {
-    fn drop(&mut self) {
-        // SAFETY: `self.job` is an owned Job Object handle and Drop runs once.
-        unsafe { CloseHandle(self.job) }.ok();
     }
 }
 
@@ -401,7 +454,10 @@ pub async fn append_log_line(log_file: PathBuf, server_name: String, line: Strin
 // -----------------------------------------------------------------------------
 
 use std::io::{self, Write};
-use tracing_subscriber::fmt::MakeWriter;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::{FmtContext, FormattedFields, MakeWriter};
+use tracing_subscriber::registry::LookupSpan;
 
 /// Concrete redacting writer for stderr.
 pub struct RedactingStderrWriter {
@@ -437,6 +493,148 @@ impl<'a> MakeWriter<'a> for RedactingMakeWriter {
         RedactingStderrWriter {
             inner: std::io::stderr(),
         }
+    }
+}
+
+/// MakeWriter implementation that returns redacting append writers for one file.
+#[derive(Clone, Debug)]
+pub struct RedactingFileMakeWriter {
+    path: PathBuf,
+}
+
+impl RedactingFileMakeWriter {
+    /// Creates a redacting writer factory for a structured log file.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+/// Redacting writer for structured file logs.
+pub struct RedactingFileWriter {
+    path: PathBuf,
+}
+
+impl Write for RedactingFileWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        if let Ok(s) = std::str::from_utf8(buf) {
+            let redacted = redact(s);
+            file.write_all(redacted.as_bytes())?;
+            Ok(buf.len())
+        } else {
+            file.write_all(buf)?;
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for RedactingFileMakeWriter {
+    type Writer = RedactingFileWriter;
+
+    fn make_writer(&self) -> Self::Writer {
+        RedactingFileWriter {
+            path: self.path.clone(),
+        }
+    }
+}
+
+/// Minimal NDJSON tracing formatter for the serve log-file sink.
+pub struct RedactingJsonFormatter;
+
+impl<S, N> FormatEvent<S, N> for RedactingJsonFormatter
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let meta = event.metadata();
+        let mut fields = JsonFieldVisitor::default();
+        event.record(&mut fields);
+
+        let mut object = fields.fields;
+        object.insert(
+            "level".to_string(),
+            serde_json::Value::String(meta.level().as_str().to_ascii_lowercase()),
+        );
+        object.insert(
+            "target".to_string(),
+            serde_json::Value::String(meta.target().to_string()),
+        );
+
+        if let Some(scope) = ctx.event_scope() {
+            for span in scope.from_root() {
+                let extensions = span.extensions();
+                if let Some(fields) = extensions.get::<FormattedFields<N>>() {
+                    if !fields.is_empty() {
+                        object.insert(
+                            format!("span.{}", span.name()),
+                            serde_json::Value::String(fields.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+
+        writeln!(writer, "{}", serde_json::Value::Object(object))
+    }
+}
+
+#[derive(Default)]
+struct JsonFieldVisitor {
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl JsonFieldVisitor {
+    fn insert(&mut self, field: &Field, value: serde_json::Value) {
+        self.fields.insert(field.name().to_string(), value);
+    }
+}
+
+impl Visit for JsonFieldVisitor {
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        let value = serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+        self.insert(field, value);
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.insert(field, serde_json::Value::Number(value.into()));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.insert(field, serde_json::Value::Number(value.into()));
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.insert(field, serde_json::Value::Bool(value));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.insert(field, serde_json::Value::String(value.to_string()));
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.insert(field, serde_json::Value::String(value.to_string()));
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let rendered = format!("{value:?}");
+        let value = serde_json::from_str::<serde_json::Value>(&rendered)
+            .unwrap_or(serde_json::Value::String(rendered));
+        self.insert(field, value);
     }
 }
 

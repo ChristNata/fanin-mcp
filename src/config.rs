@@ -11,12 +11,16 @@
 //!
 //! ```toml
 //! [servers.<name>]
-//! transport = "stdio"          # optional; defaults to "stdio" in Phase 1
+//! transport = "stdio"          # optional; defaults to "stdio"
 //! command = '<path>'           # required for stdio
 //! args = []                    # optional; default empty
 //! timeout_secs = 60            # optional; default 60 (Phase 2 parses, Phase 3 wraps)
 //! log_file = '<path>'          # optional
 //! [servers.<name>.env]         # optional; values may contain ${VAR} (interpolated at spawn)
+//! # or:
+//! transport = "streamable-http"
+//! endpoint = "http://127.0.0.1:8080/mcp"
+//! [servers.<name>.headers]      # optional; values may contain ${VAR}
 //!
 //! [namespaces.<name>]
 //! servers = ["<name>"]         # the servers visible in this namespace
@@ -84,20 +88,21 @@ pub struct TomlConfig {
     pub namespaces: HashMap<String, NamespaceConfig>,
 }
 
-/// A single stdio upstream server (`[servers.<name>]`).
+/// A single upstream server (`[servers.<name>]`).
 ///
 /// Fields are read by later phases (registry/process forward path); Phase 1
 /// validates `transport`, `command` presence, and server names.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
-    /// Transport kind. Optional in Phase 1; defaults to `"stdio"`. Any other
-    /// value fails startup because Phase 1 has no remote transport path.
+    /// Transport kind. Optional; defaults to `"stdio"`.
     #[serde(default)]
     pub transport: Option<String>,
     /// The spawn command. Required for stdio servers; a missing `command`
     /// fails startup (see [`TomlConfig::validate`]).
     pub command: Option<String>,
+    /// Streamable-HTTP endpoint URL. Required for `transport = "streamable-http"`.
+    pub endpoint: Option<String>,
     /// Spawn args. Optional; defaults to an empty vector.
     #[serde(default)]
     pub args: Vec<String>,
@@ -107,6 +112,11 @@ pub struct ServerConfig {
     /// Literal (non-secret) values pass through unchanged.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Static HTTP headers for Streamable-HTTP upstreams.
+    /// Values may contain `${VAR}` placeholders resolved through the same
+    /// credential chain as env vars.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     /// Optional per-server log sink for child stderr + upstream log
     /// notifications (Phase 2+ asserts against it).
     pub log_file: Option<String>,
@@ -173,25 +183,40 @@ impl TomlConfig {
             validate_server_name(name)?;
         }
 
-        // 2. Transport is optional but, when present, must be the only Phase 1
-        //    transport: stdio. Remote transports are later phases.
+        // 2. Transport is optional and defaults to stdio. Phase 5 adds the
+        //    minimal Streamable-HTTP client transport for remote upstreams.
         for (name, server) in &self.servers {
-            if !matches!(server.transport.as_deref(), None | Some("stdio")) {
-                return Err(StartupError::UnsupportedTransport {
-                    server: name.clone(),
-                    transport: server.transport.clone().unwrap_or_default(),
-                });
+            match server.transport_kind() {
+                "stdio" | "streamable-http" => {}
+                transport => {
+                    return Err(StartupError::UnsupportedTransport {
+                        server: name.clone(),
+                        transport: transport.to_string(),
+                    });
+                }
             }
         }
 
-        // 3. stdio servers must declare a `command`. A missing command fails
-        //    startup (a server table without the spawn entry is malformed).
+        // 3. Validate transport-specific required fields.
         for (name, server) in &self.servers {
-            if !matches!(server.command.as_deref().map(str::trim), Some(command) if !command.is_empty())
-            {
-                return Err(StartupError::StdioServerMissingCommand {
-                    server: name.clone(),
-                });
+            match server.transport_kind() {
+                "stdio" => {
+                    if !matches!(server.command.as_deref().map(str::trim), Some(command) if !command.is_empty())
+                    {
+                        return Err(StartupError::StdioServerMissingCommand {
+                            server: name.clone(),
+                        });
+                    }
+                }
+                "streamable-http" => {
+                    if !matches!(server.endpoint.as_deref().map(str::trim), Some(endpoint) if !endpoint.is_empty())
+                    {
+                        return Err(StartupError::HttpServerMissingEndpoint {
+                            server: name.clone(),
+                        });
+                    }
+                }
+                _ => unreachable!("unsupported transports are rejected above"),
             }
         }
 
@@ -233,6 +258,13 @@ impl TomlConfig {
         }
 
         Ok(())
+    }
+}
+
+impl ServerConfig {
+    /// Returns the configured transport kind, defaulting to stdio.
+    pub fn transport_kind(&self) -> &str {
+        self.transport.as_deref().unwrap_or("stdio")
     }
 }
 

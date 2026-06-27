@@ -167,6 +167,8 @@ pub enum StartupError {
     UnsupportedTransport { server: String, transport: String },
     /// A stdio server table is missing the `command` field.
     StdioServerMissingCommand { server: String },
+    /// A Streamable-HTTP server table is missing the `endpoint` field.
+    HttpServerMissingEndpoint { server: String },
     /// The resolved `--namespace` is not present in `[namespaces]`.
     UnknownNamespace { namespace: String },
     /// A `[namespaces.<name>.tools]` key names a server that is not in that
@@ -192,13 +194,19 @@ impl std::fmt::Display for StartupError {
             StartupError::UnsupportedTransport { server, transport } => {
                 write!(
                     f,
-                    "unsupported transport `{transport}` for server `{server}`; Phase 1 supports only `stdio`"
+                    "unsupported transport `{transport}` for server `{server}`; supported transports are `stdio` and `streamable-http`"
                 )
             }
             StartupError::StdioServerMissingCommand { server } => {
                 write!(
                     f,
                     "stdio server `{server}` is missing the required `command` field"
+                )
+            }
+            StartupError::HttpServerMissingEndpoint { server } => {
+                write!(
+                    f,
+                    "streamable-http server `{server}` is missing the required `endpoint` field"
                 )
             }
             StartupError::UnknownNamespace { namespace } => {

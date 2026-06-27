@@ -3,10 +3,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
 use rmcp::service::{RunningService, ServiceError};
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use rmcp::{RoleClient, ServiceExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
@@ -31,6 +35,8 @@ pub type UpstreamService = RunningService<RoleClient, UpstreamClientHandler>;
 /// can observe it on the read path.
 #[derive(Debug)]
 pub struct UpstreamEntry {
+    /// Configured upstream server name for lifecycle diagnostics.
+    pub server: String,
     /// Live rmcp client service.
     pub service: Arc<UpstreamService>,
     /// Cached tools/list inventory for the session (refetchable on dirty).
@@ -40,6 +46,12 @@ pub struct UpstreamEntry {
     pub dirty: Arc<AtomicBool>,
     /// OS process-tree containment handle retained for the service lifetime.
     pub _containment: crate::process::ContainmentGuard,
+}
+
+impl Drop for UpstreamEntry {
+    fn drop(&mut self) {
+        tracing::info!(server = %self.server, event = "upstream_disconnect", "upstream disconnected");
+    }
 }
 
 /// Lazy upstream registry with per-server initialization guards.
@@ -108,8 +120,17 @@ impl Registry {
             let resolved = crate::process::resolve_env_value(&*store, cred_choice, server, raw)?;
             resolved_env.insert(lhs.clone(), resolved);
         }
+        let mut resolved_headers = HashMap::new();
+        for (name, raw) in &server_config.headers {
+            let resolved = crate::process::resolve_env_value(&*store, cred_choice, server, raw)?;
+            if raw.contains("${") {
+                crate::process::register_secret(&resolved);
+            }
+            resolved_headers.insert(name.clone(), resolved);
+        }
 
-        let entry = Arc::new(connect(server, server_config, &resolved_env).await?);
+        let entry =
+            Arc::new(connect(server, server_config, &resolved_env, &resolved_headers).await?);
         self.entries
             .write()
             .await
@@ -164,19 +185,50 @@ impl Registry {
         // (D-007 / GOTCHA #16). The config is an Arc; a short read is safe.
         let effective = self.effective_timeout(server);
 
+        let started = Instant::now();
         let call_fut = entry.service.peer().call_tool(params);
-        match timeout(effective, call_fut).await {
-            Ok(Ok(result)) => Ok(result),
+        let outcome = match timeout(effective, call_fut).await {
+            Ok(Ok(result)) => {
+                let is_error = result.is_error.unwrap_or(false);
+                log_tool_call(
+                    server,
+                    tool,
+                    started,
+                    if is_error { "failure" } else { "success" },
+                );
+                Ok(result)
+            }
             Ok(Err(e)) => {
                 // Transport-layer death → UpstreamDisconnected (distinct from live-call failure).
                 // No map lock held across the await (D-007).
-                Err(map_service_error(e, server, tool))
+                log_tool_call(server, tool, started, "failure");
+                let mapped = map_service_error(e, server, tool);
+                if matches!(mapped, ToolError::UpstreamDisconnected { .. }) {
+                    tracing::warn!(
+                        server,
+                        tool,
+                        event = "upstream_disconnect",
+                        "upstream disconnected"
+                    );
+                }
+                Err(mapped)
             }
-            Err(_elapsed) => Err(ToolError::UpstreamTimeout {
-                server: server.to_string(),
-                tool: tool.to_string(),
-            }),
-        }
+            Err(_elapsed) => {
+                log_tool_call(server, tool, started, "failure");
+                tracing::warn!(
+                    server,
+                    tool,
+                    event = "upstream_failure",
+                    code = "timeout",
+                    "upstream call timed out"
+                );
+                Err(ToolError::UpstreamTimeout {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                })
+            }
+        };
+        outcome
     }
 
     /// Effective timeout for a server (from config, default 60).
@@ -265,22 +317,41 @@ fn map_service_error(e: ServiceError, server: &str, tool: &str) -> ToolError {
     }
 }
 
+fn build_http_headers(
+    server: &str,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<HeaderName, HeaderValue>, ToolError> {
+    let mut custom_headers = std::collections::HashMap::new();
+    for (name, value) in headers {
+        let header_name =
+            HeaderName::from_bytes(name.as_bytes()).map_err(|e| ToolError::UpstreamConnect {
+                server: server.to_string(),
+                message: format!("invalid HTTP header name `{name}`: {e}"),
+            })?;
+        let header_value =
+            HeaderValue::from_str(value).map_err(|e| ToolError::UpstreamConnect {
+                server: server.to_string(),
+                message: format!("invalid HTTP header value for `{name}`: {e}"),
+            })?;
+        custom_headers.insert(header_name, header_value);
+    }
+    Ok(custom_headers)
+}
+
 async fn connect(
     server: &str,
     config: &ServerConfig,
     resolved_env: &std::collections::HashMap<String, String>,
+    resolved_headers: &std::collections::HashMap<String, String>,
 ) -> Result<UpstreamEntry, ToolError> {
     let log_file = config.log_file.as_ref().map(std::path::PathBuf::from);
+    tracing::info!(
+        server,
+        event = "upstream_connect_start",
+        "upstream connect starting"
+    );
 
-    let spawned =
-        crate::process::spawn_stdio_transport(server, config, resolved_env).map_err(|e| {
-            ToolError::UpstreamConnect {
-                server: server.to_string(),
-                message: e.to_string(),
-            }
-        })?;
-    let transport = spawned.transport;
-    let containment = spawned.containment;
+    let containment = crate::process::ContainmentGuard::Retained;
     debug_assert!(containment.is_retained());
 
     // Create the per-server dirty flag BEFORE the handler so we can share it.
@@ -288,27 +359,72 @@ async fn connect(
     // No registry map lock is involved here; this is purely local to the entry.
     let dirty = Arc::new(AtomicBool::new(false));
     let handler = UpstreamClientHandler::new(server, log_file, dirty.clone());
-    let service = handler
-        .serve(transport)
-        .await
-        .map_err(|e| ToolError::UpstreamConnect {
+    let service = match config.transport_kind() {
+        "stdio" => {
+            let spawned = crate::process::spawn_stdio_transport(server, config, resolved_env)
+                .map_err(|e| {
+                    tracing::warn!(server, event = "upstream_connect_failure", error = %e, "upstream spawn failed");
+                    ToolError::UpstreamConnect {
+                        server: server.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
+            let transport = spawned.transport;
+            debug_assert!(spawned.containment.is_retained());
+            handler.serve(transport).await
+        }
+        "streamable-http" => {
+            let endpoint = config.endpoint.as_deref().unwrap_or_default();
+            let headers = build_http_headers(server, resolved_headers)?;
+            let transport_config =
+                StreamableHttpClientTransportConfig::with_uri(endpoint.to_string())
+                    .custom_headers(headers);
+            let transport = StreamableHttpClientTransport::from_config(transport_config);
+            handler.serve(transport).await
+        }
+        _ => unreachable!("config validation rejects unsupported transports"),
+    }
+    .map_err(|e| {
+        tracing::warn!(server, event = "upstream_connect_failure", error = %e, "upstream service failed to start");
+        ToolError::UpstreamConnect {
             server: server.to_string(),
             message: e.to_string(),
-        })?;
+        }
+    })?;
     let service = Arc::new(service);
     let tools = service
         .peer()
         .list_all_tools()
         .await
-        .map_err(|e| ToolError::UpstreamConnect {
-            server: server.to_string(),
-            message: e.to_string(),
+        .map_err(|e| {
+            tracing::warn!(server, event = "upstream_connect_failure", error = %e, "upstream inventory failed");
+            ToolError::UpstreamConnect {
+                server: server.to_string(),
+                message: e.to_string(),
+            }
         })?;
+    tracing::info!(
+        server,
+        event = "upstream_connect_success",
+        "upstream connected"
+    );
 
     Ok(UpstreamEntry {
+        server: server.to_string(),
         service,
         tools: RwLock::new(tools),
         dirty,
         _containment: containment,
     })
+}
+
+fn log_tool_call(server: &str, tool: &str, started: Instant, outcome: &str) {
+    tracing::info!(
+        server,
+        tool,
+        latency_ms = started.elapsed().as_secs_f64() * 1000.0,
+        outcome,
+        event = "invoke_tool",
+        "upstream tool call completed"
+    );
 }

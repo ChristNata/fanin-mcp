@@ -53,35 +53,58 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
                         }
                     }
                 }
-                let body = if req.contains("initialize") {
-                    serde_json::json!({
-                        "jsonrpc":"2.0",
-                        "id": 1,
-                        "result": {
-                            "protocolVersion":"2024-11-05",
-                            "capabilities":{"tools":{}},
-                            "serverInfo":{"name":"http-probe","version":"0.0.0"}
-                        }
-                    })
-                } else if req.contains("tools/list") {
-                    serde_json::json!({
-                        "jsonrpc":"2.0",
-                        "id": 2,
-                        "result": {"tools":[{"name":"echo_ok","description":"HTTP echo","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}
-                    })
-                } else {
-                    serde_json::json!({
-                        "jsonrpc":"2.0",
-                        "id": 3,
-                        "result": {"content":[{"type":"text","text":"http echo ok"}],"isError":false}
-                    })
-                }
-                .to_string();
                 let status = if seen.contains(&expected) {
                     "200 OK"
                 } else {
                     "401 Unauthorized"
                 };
+                let Some((_, body_text)) = req.split_once("\r\n\r\n") else {
+                    return;
+                };
+                let Ok(request) = serde_json::from_str::<Value>(body_text) else {
+                    return;
+                };
+                let id = request.get("id").cloned();
+                let method = request.get("method").and_then(Value::as_str);
+                let Some(id) = id else {
+                    let status = if seen.contains(&expected) {
+                        "202 Accepted"
+                    } else {
+                        "401 Unauthorized"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return;
+                };
+                let body = match method {
+                    Some("initialize") => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion":"2024-11-05",
+                            "capabilities":{"tools":{}},
+                            "serverInfo":{"name":"http-probe","version":"0.0.0"}
+                        }
+                    }),
+                    Some("tools/list") => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": id,
+                        "result": {"tools":[{"name":"echo_ok","description":"HTTP echo","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}
+                    }),
+                    Some("tools/call") => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": id,
+                        "result": {"content":[{"type":"text","text":"http echo ok"}],"isError":false}
+                    }),
+                    _ => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": id,
+                        "error": {"code": -32601, "message": "method not found"}
+                    }),
+                }
+                .to_string();
                 let response = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     body.len(), body

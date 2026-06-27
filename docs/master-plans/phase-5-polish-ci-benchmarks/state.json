@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "implementer",
+  "current_step": "reviewer",
   "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main at end of cycle)",
   "decisions": {
     "macos-hardkill": "Documented limitation — Linux PDEATHSIG + Windows suspended-spawn are crash-safe; macOS graceful process-group teardown only, SIGKILL-orphan gap documented (no daemon/supervisor/kqueue). User-accepted default.",
@@ -21,8 +21,10 @@
       "note": "P1-P5 contracts authored; fmt+clippy clean, suite compiles. token_figures fails-by-assertion until bench exists (expected). test-needs-impl: expose map_service_error (CARRY-4); --log-file/--log-level CLI; streamable-http config shape; bench writes target/token-figures.generated.md + README markers. P4 crit 10/11 reuse existing namespace_acl/cred_store green coverage."
     },
     "implementer": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T10:25:00Z",
+      "note": "Code-complete, full suite 115/0/4, fmt+clippy(-D warnings)+cargo-deny clean, stripped binary 8.27MB (<10MB). Per plan-phase: P1 observability (gpt-5.5 after glm-5.2 monologue no-op), P2 containment CARRY-1 process-wrap suspended-spawn + self-job + CARRY-2 Linux PDEATHSIG/macOS-documented (gpt-5.5), P3 streamable-http + header redaction (gpt-5.5; test-mock id-echo defect fixed by test-creator), P4 NO-OP (contracts already pass: tool_search green, CARRY-4 source-guard satisfied by Phase-4 mapping, namespace/cred reuse existing), P5 token bench bytes/4 estimate (grok-build-0.1), P6 CI 3-OS + deny.toml + budgets (gpt-5.5, 1 transient SQLite-lock retry). P7 docs DEFERRED to knowledge-sync stage (doc-reconciliation home). Watch-items for review: P5 token measure is a byte-estimate not a true tokenizer; deny.toml duplicate-version skips; P2 Linux path CI-verified-only (no local linux target).",
+      "deferred_to_knowledge_sync": "plan-Phase-7 doc reconciliation (SECURITY macOS limitation, AggError->ToolError DRIFT-1, rmcp-general feature-name OQ3 fix, STACK.md HTTP-client deps, README framing)"
     },
     "simplifier": {
       "status": "pending",

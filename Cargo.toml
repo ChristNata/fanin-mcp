@@ -25,12 +25,16 @@ autotests = false
 # with stale signatures. Features: `server` + `client` (dual role),
 # `transport-io` (server-side stdio), `transport-child-process`
 # (client-side stdio over a spawned child — used in later phases to connect
-# to upstreams).
+# to upstreams), `transport-streamable-http-client` +
+# `transport-streamable-http-client-reqwest` (reqwest-backed client path for
+# loopback Streamable-HTTP upstreams).
 rmcp = { version = "=1.8.0", default-features = false, features = [
     "server",
     "client",
     "transport-io",
     "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
 ] }
 
 # process-wrap — provides JobObject (Windows) and ProcessSession/ProcessGroup (Unix)
@@ -65,6 +69,8 @@ tracing-subscriber = "0.3"
 # a direct build-time input for tool input-schema generation in P0.2, so it
 # is declared explicitly here.
 schemars = "0.8"
+# http — header name/value types used by rmcp's Streamable-HTTP custom header API.
+http = "1"
 
 # Hidden prompt for `cred set`.
 rpassword = "7"
@@ -88,6 +94,7 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }
+libc = "0.2"
 
 [dev-dependencies]
 # Explicit dev-deps so the integration test binary is self-contained per
@@ -125,3 +132,8 @@ path = "tests/probe-server/main.rs"
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+[[bench]]
+name = "token_cost"
+path = "benches/token_cost.rs"
+harness = false

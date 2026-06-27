@@ -19,6 +19,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::filter::LevelFilter;
 
 use rmcp::ServiceExt;
 
@@ -26,6 +27,11 @@ use crate::config::CliConfig;
 use crate::namespace::ActiveNamespace;
 use crate::registry::Registry;
 use crate::server::Aggregator;
+
+/// Private argv sentinel for the Phase 5 immediate-descendant test child.
+pub const IMMEDIATE_DESCENDANT_SENTINEL: &str = "__fanin_immediate_descendant__";
+
+const IMMEDIATE_DESCENDANT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The top-level CLI.
 #[derive(Debug, Parser)]
@@ -48,6 +54,18 @@ struct Cli {
     /// Env fallback is always available for reads regardless of this choice.
     #[arg(long, global = true, value_enum, default_value_t = crate::credentials::CredentialStoreChoice::Keyring)]
     credential_store: crate::credentials::CredentialStoreChoice,
+
+    /// Write structured redacted diagnostics to this NDJSON file instead of stderr.
+    #[arg(long, global = true)]
+    log_file: Option<PathBuf>,
+
+    /// Minimum log level for serve diagnostics.
+    #[arg(long, global = true, default_value = "info")]
+    log_level: String,
+
+    /// Spawn a contained long-lived descendant at startup and write its PID.
+    #[arg(long, global = true, hide = true)]
+    spawn_immediate_descendant: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -93,16 +111,79 @@ enum CredAction {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    init_tracing();
+    if let Some(marker_path) = parse_immediate_descendant_sentinel() {
+        return run_immediate_descendant(marker_path).await;
+    }
 
     let cli = Cli::parse();
+    let log_level = match parse_log_level(&cli.log_level) {
+        Ok(level) => level,
+        Err(()) => {
+            eprintln!("invalid --log-level: {}", cli.log_level);
+            return ExitCode::FAILURE;
+        }
+    };
+    init_tracing(cli.log_file.clone(), log_level);
+    let command = cli.command.unwrap_or(Command::Serve);
+
+    let _process_tree_guard = if matches!(command, Command::Serve) {
+        match crate::process::contain_current_process_tree() {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install process-tree containment");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
+    let _immediate_descendant = match cli.spawn_immediate_descendant.as_ref() {
+        Some(marker_path) => match crate::process::spawn_immediate_descendant(marker_path) {
+            Ok(guard) => {
+                if let Some(pid) = guard.id() {
+                    tracing::debug!(pid, marker = %marker_path.display(), "spawned immediate descendant");
+                }
+                Some(guard)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, marker = %marker_path.display(), "failed to spawn immediate descendant");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
     let credential_store = cli.credential_store;
     let config = CliConfig::from_flags(cli.namespace, cli.config, credential_store);
 
-    match cli.command.unwrap_or(Command::Serve) {
+    match command {
         Command::Serve => run_serve(config).await,
         Command::Cred { action } => run_cred(action, credential_store),
     }
+}
+
+fn parse_immediate_descendant_sentinel() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next()?;
+    if first == IMMEDIATE_DESCENDANT_SENTINEL {
+        return args.next().map(PathBuf::from);
+    }
+    None
+}
+
+async fn run_immediate_descendant(marker_path: PathBuf) -> ExitCode {
+    if let Err(e) = std::fs::write(&marker_path, std::process::id().to_string()) {
+        eprintln!(
+            "immediate descendant failed to write marker {}: {e}",
+            marker_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    tokio::time::sleep(IMMEDIATE_DESCENDANT_LIFETIME).await;
+    let _ = std::fs::remove_file(&marker_path);
+    ExitCode::SUCCESS
 }
 
 /// Run the stdio MCP server.
@@ -125,7 +206,25 @@ async fn run_serve(config: CliConfig) -> ExitCode {
     // the selected credential store), and the meta-tool dispatch path.
     let loaded = if let Some(path) = config.config_path.as_ref() {
         match crate::config::load_and_validate(path, &config.namespace) {
-            Ok(loaded) => Some(loaded),
+            Ok(loaded) => {
+                tracing::info!(path = %path.display(), "config loaded");
+                if let Some(marker_path) = immediate_descendant_marker_from_config(&loaded) {
+                    match crate::process::spawn_immediate_descendant(&marker_path) {
+                        Ok(_guard) => {
+                            // Intentionally leaked: this hidden regression hook
+                            // must retain the containment handle until process
+                            // death, including force-kill paths where Drop does
+                            // not run.
+                            std::mem::forget(_guard);
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, marker = %marker_path.display(), "failed to spawn configured immediate descendant");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                Some(loaded)
+            }
             Err(e) => {
                 tracing::error!(error = %e, "startup config validation failed");
                 return ExitCode::FAILURE;
@@ -137,7 +236,11 @@ async fn run_serve(config: CliConfig) -> ExitCode {
 
     let aggregator = if let Some(loaded) = loaded {
         let namespace = ActiveNamespace::new(&loaded, &config.namespace);
-        tracing::debug!(namespace = namespace.name(), "active namespace selected");
+        tracing::info!(namespace = namespace.name(), "active namespace selected");
+        tracing::debug!(
+            namespace = namespace.name(),
+            "active namespace selected debug"
+        );
         let registry = Arc::new(Registry::new(loaded, config.credential_store));
         Aggregator::with_registry(config, registry, namespace)
     } else {
@@ -162,6 +265,18 @@ async fn run_serve(config: CliConfig) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn immediate_descendant_marker_from_config(config: &crate::config::TomlConfig) -> Option<PathBuf> {
+    for server in config.servers.values() {
+        let mut args = server.args.iter();
+        while let Some(arg) = args.next() {
+            if arg == "--spawn-immediate-descendant" {
+                return args.next().map(PathBuf::from);
+            }
+        }
+    }
+    None
 }
 
 /// Run a `cred` subcommand.
@@ -271,12 +386,32 @@ fn credential_backend_name(choice: crate::credentials::CredentialStoreChoice) ->
 /// The subscriber is installed before any serve logic runs.
 /// Phase 2 redaction is applied at tracing, child stderr log, and upstream
 /// notification sinks. All diagnostics still go to stderr, never stdout.
-fn init_tracing() {
-    use tracing_subscriber::filter::LevelFilter;
+fn parse_log_level(raw: &str) -> Result<LevelFilter, ()> {
+    match raw.to_ascii_lowercase().as_str() {
+        "off" => Ok(LevelFilter::OFF),
+        "error" => Ok(LevelFilter::ERROR),
+        "warn" | "warning" => Ok(LevelFilter::WARN),
+        "info" => Ok(LevelFilter::INFO),
+        "debug" => Ok(LevelFilter::DEBUG),
+        "trace" => Ok(LevelFilter::TRACE),
+        _ => Err(()),
+    }
+}
+
+/// Initialize `tracing` with a redacting writer.
+fn init_tracing(log_file: Option<PathBuf>, level: LevelFilter) {
     use tracing_subscriber::fmt;
 
-    fmt()
-        .with_max_level(LevelFilter::INFO)
-        .with_writer(crate::process::RedactingMakeWriter)
-        .init();
+    if let Some(path) = log_file {
+        fmt()
+            .event_format(crate::process::RedactingJsonFormatter)
+            .with_max_level(level)
+            .with_writer(crate::process::RedactingFileMakeWriter::new(path))
+            .init();
+    } else {
+        fmt()
+            .with_max_level(level)
+            .with_writer(crate::process::RedactingMakeWriter)
+            .init();
+    }
 }
