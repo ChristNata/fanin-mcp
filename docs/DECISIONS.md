@@ -80,7 +80,7 @@ All entries below: **Status: Accepted · Date: 2026-06** (initial design review)
 
 ## D-012 — Per-server `timeout_secs` (default 60s) + cancellation forwarding
 
-**Decision:** Every upstream call wrapped in a per-server-configurable timeout returning structured `upstream_timeout`. Client cancellation notifications forwarded to in-flight calls. Progress-based idle timeout is v1.1.
+**Decision:** Every *blocking upstream await* wrapped in a per-server-configurable timeout returning structured `upstream_timeout` — the connect/`initialize` handshake, the initial `list_all_tools` discovery, the `list_changed` dirty-refetch, and the `tools/call` itself (not only tool calls). A connect-time expiry caches no entry, releases the per-server init guard, and drops the containment guard to reap the half-connected child. Client cancellation notifications forwarded to in-flight calls. Progress-based idle timeout is v1.1.
 **Why:** A flat global timeout is wrong in both directions (big DB queries vs fast doc lookups). Clients run their own MCP timeouts (e.g. CC's `MCP_TOOL_TIMEOUT`); ours exists to fail *informatively* first and free resources — documented interplay.
 **Rejected:** No timeout (hung upstreams hold resources silently); dynamic-only (many servers never emit progress).
 
