@@ -265,7 +265,7 @@ No database. No authoritative persistent state beyond config + keychain. (v1.1 a
 | `rpassword` (or similar) | Hidden stdin prompt for `cred set` | |
 | `dirs` | Platform paths | |
 
-CI: 3-OS matrix (Windows/macOS/Linux), `cargo audit`, `cargo deny`, integration tests against the in-repo probe server (no Node required).
+CI: 3-OS matrix (Windows/macOS/Linux), `cargo deny` (bans/licenses/sources; advisory scanning paused pending CVSS-4.0 parser support upstream), integration tests against the in-repo probe server (no Node required).
 
 ## Platform Considerations
 

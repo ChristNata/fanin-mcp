@@ -65,7 +65,7 @@ postgres = ["query", "list_tables"]  # write tools (insert, update, ...) are the
 ## Supply Chain (project itself)
 
 - `Cargo.lock` committed; `rmcp` and all dependencies pinned.
-- `cargo audit` and `cargo deny` run in CI on every commit.
+- `cargo deny` (bans / licenses / sources) runs in CI on every commit. **Advisory scanning is temporarily paused:** the RustSec advisory DB now ships CVSS 4.0 entries that the current RustSec parser tooling (both `cargo audit` and `cargo deny` 0.19.x) rejects on load (`unsupported CVSS version: 4.0`). It will be re-enabled (`cargo deny check`) once the tooling supports CVSS 4.0. The deliberately small, exact-pinned dependency tree (with committed `Cargo.lock`) bounds the exposure in the interim.
 - Deliberately minimal dependency tree (no web framework, no database). Remote Streamable-HTTP upstreams pull a reqwest/hyper **HTTP client** (a client, never a listener — the no-daemon/no-port non-goal holds); for the loopback test path TLS features are trimmed, and a TLS stack is only linked when a real remote upstream requires HTTPS. `cargo deny` (licenses/bans/sources) and the `< 10 MB` stripped-binary budget keep the tree honest in CI.
 - Release binaries published with checksums and signatures.
 - Reproducible release builds are a goal; deviations documented.

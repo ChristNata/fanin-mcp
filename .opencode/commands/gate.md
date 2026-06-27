@@ -1,6 +1,6 @@
 ---
 name: gate
-description: Run the fanin-mcp security/release gate — cargo audit, cargo deny, and the token benchmark.
+description: Run the fanin-mcp security/release gate — cargo deny (advisories/bans/licenses/sources), and the token benchmark.
 argument-hint: "[--no-bench]"
 disable-model-invocation: true
 ---
@@ -15,15 +15,21 @@ benchmark (the slow step) when you only need the security gates.
 Run from the repo root. Report each gate's outcome explicitly; a red gate is a
 failure to surface, never a step to wave through.
 
-## 1. Supply-chain audit — `cargo audit`
+## 1. Supply-chain audit — RUSTSEC advisories
 
 ```bash
-cargo audit
+cargo deny check advisories
 ```
 
-Fails on any advisory in the dependency tree (RUSTSEC). If `cargo-audit` is
-not installed, surface that and stop — do not silently skip. Install hint:
-`cargo install cargo-audit`.
+Fails on any advisory in the dependency tree (RUSTSEC). Covered by `cargo deny`
+(below), not a separate `cargo audit` — both share the RustSec DB.
+
+> **Temporarily paused (2026-06):** the RustSec advisory DB now ships **CVSS 4.0**
+> entries that the current parser tooling (`cargo audit` AND `cargo deny`
+> 0.19.x) rejects on load (`unsupported CVSS version: 4.0`). Until a `cargo deny`
+> release supports CVSS 4.0, CI runs `cargo deny check bans licenses sources`
+> (advisories excluded). Re-enable with the full `cargo deny check` once fixed.
+> The small, exact-pinned tree (committed `Cargo.lock`) bounds the interim risk.
 
 ## 2. License + ban + source policy — `cargo deny`
 

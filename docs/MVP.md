@@ -53,7 +53,7 @@ A single Rust binary added to any CC or OC config as a stdio MCP server, proxyin
 ## Phase 5: Polish + Cross-Platform CI + Benchmarks (Days 11–12)
 
 1. `tracing` JSON file output (`--log-file`, `--log-level`); log every call (server, tool, latency, outcome), connect/disconnect, config load — redaction verified
-2. **CI matrix: Windows + macOS + Linux** from this phase onward; `cargo audit` + `cargo deny`
+2. **CI matrix: Windows + macOS + Linux** from this phase onward; `cargo deny` (bans/licenses/sources; advisory scan paused — upstream CVSS-4.0 tooling gap)
 3. Integration tests vs CC (global + per-project), OC (`opencode.json`), probe server, and one real remote HTTP upstream with header auth
 4. Namespace switching, credential E2E, Tool Search composition check on CC
 5. **Token benchmark:** measure actual `tools/list` + typical-session token costs; README numbers come from this, not estimates
@@ -108,7 +108,7 @@ A single Rust binary added to any CC or OC config as a stdio MCP server, proxyin
 - [ ] Upstream stderr lands in the log file with `[server]` prefix, not the aggregator's stderr
 - [ ] Hard-kill of the aggregator leaves zero orphaned upstream processes (Windows Job Object / Unix process group) — CI-tested on all OSes
 - [ ] Session teardown on stdin EOF: full tree teardown, clean exit
-- [ ] `cargo audit` / `cargo deny` clean; `Cargo.lock` committed; rmcp pinned exactly
+- [ ] `cargo deny` (bans/licenses/sources) clean (advisory scan paused: upstream CVSS-4.0 tooling gap); `Cargo.lock` committed; rmcp pinned exactly
 - [ ] Token benchmark run; README figures match measurements
 - [ ] Binary < 10MB stripped; idle < 15MB RSS; works on Windows 10+, macOS 12+, Linux
 - [ ] CC Tool Search composes (3 meta-tools, no conflict)

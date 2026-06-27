@@ -40,7 +40,7 @@ No web framework. No HTTP server. No database / SQLite / ORM. No plugin loader. 
 | Integration fixture | **In-repo probe server** (rmcp binary: `echo_ok`, `always_error`, `slow_tool`, `dangerous_noop`, `needs_sampling`) — CI needs no Node, no real databases (D-016) |
 | Test style | Spawn the compiled binary, speak JSON-RPC over stdio — real-transport tests, not mocked handlers |
 | CI | GitHub Actions matrix: `windows-latest`, `macos-latest`, `ubuntu-latest` |
-| Security gates | `cargo audit`, `cargo deny` on every commit; sentinel-secret log-redaction test; hard-kill orphan-process test (all OSes) |
+| Security gates | `cargo deny` (bans/licenses/sources) on every commit (advisory scanning paused pending CVSS-4.0 parser support upstream); sentinel-secret log-redaction test; hard-kill orphan-process test (Windows whole-tree; Unix graceful + direct-child) |
 | Benchmarks | Token-cost benchmark (tools/list + typical session) — README numbers are generated, never hand-written |
 
 ## Build & Release Profile
