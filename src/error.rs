@@ -169,6 +169,8 @@ pub enum StartupError {
     StdioServerMissingCommand { server: String },
     /// A Streamable-HTTP server table is missing the `endpoint` field.
     HttpServerMissingEndpoint { server: String },
+    /// A server declared `cwd`, but the value is empty or whitespace-only.
+    EmptyCwd { server: String },
     /// The resolved `--namespace` is not present in `[namespaces]`.
     UnknownNamespace { namespace: String },
     /// A `[namespaces.<name>.tools]` key names a server that is not in that
@@ -208,6 +210,9 @@ impl std::fmt::Display for StartupError {
                     f,
                     "streamable-http server `{server}` is missing the required `endpoint` field"
                 )
+            }
+            StartupError::EmptyCwd { server } => {
+                write!(f, "server `{server}` has empty or whitespace-only `cwd`")
             }
             StartupError::UnknownNamespace { namespace } => {
                 write!(

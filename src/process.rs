@@ -243,10 +243,14 @@ pub fn spawn_stdio_transport(
     server_name: &str,
     config: &ServerConfig,
     resolved_env: &HashMap<String, String>,
+    resolved_cwd: Option<&str>,
 ) -> Result<SpawnedTransport, std::io::Error> {
     let command = config.command.as_deref().unwrap_or_default();
     let mut cmd = Command::new(command);
     cmd.args(&config.args);
+    if let Some(cwd) = resolved_cwd {
+        cmd.current_dir(cwd);
+    }
 
     // Least-privilege: start from a clean env, then inject ONLY this server's vars.
     // This prevents sibling credentials and the aggregator's ambient env from leaking.

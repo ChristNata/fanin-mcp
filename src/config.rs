@@ -14,6 +14,7 @@
 //! transport = "stdio"          # optional; defaults to "stdio"
 //! command = '<path>'           # required for stdio
 //! args = []                    # optional; default empty
+//! cwd = '<path>'               # optional; stdio child working directory; may contain ${VAR}
 //! timeout_secs = 60            # optional; default 60 (Phase 2 parses, Phase 3 wraps)
 //! log_file = '<path>'          # optional
 //! [servers.<name>.env]         # optional; values may contain ${VAR} (interpolated at spawn)
@@ -106,6 +107,13 @@ pub struct ServerConfig {
     /// Spawn args. Optional; defaults to an empty vector.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional stdio child working directory.
+    ///
+    /// When present for stdio upstreams this is resolved at connect time using
+    /// the same `${VAR}` credential/env path as env and headers, then applied
+    /// with `Command::current_dir`. When absent, the child inherits fanin-mcp's
+    /// process working directory. Streamable-HTTP accepts but ignores this field.
+    pub cwd: Option<String>,
     /// Per-server env vars (`[servers.<name>.env]`). Optional.
     /// Values may contain `${VAR}` placeholders; these are resolved at spawn
     /// time (preferred credential store → process env fallback → structured error).
@@ -199,6 +207,12 @@ impl TomlConfig {
 
         // 3. Validate transport-specific required fields.
         for (name, server) in &self.servers {
+            if matches!(server.cwd.as_deref().map(str::trim), Some(cwd) if cwd.is_empty()) {
+                return Err(StartupError::EmptyCwd {
+                    server: name.clone(),
+                });
+            }
+
             match server.transport_kind() {
                 "stdio" => {
                     if !matches!(server.command.as_deref().map(str::trim), Some(command) if !command.is_empty())

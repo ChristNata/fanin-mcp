@@ -3,13 +3,13 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "implementer",
+  "current_step": "reviewer",
   "cycle_model": "linear-on-main (no worktree/PR/merge; checkpoint commits to main, one end-of-cycle push only after user confirms)",
   "origin": "Spun from docs/master-plans/full-codebase-review/review-SYNTHESIS.md — remediates S-1 (unbounded upstream connect/discovery/refetch outside timeout_secs, D-012 violation) and D-1 (documented per-server cwd field unimplemented).",
   "steps": {
     "planner": { "status": "complete", "at": "2026-06-27T23:00:00Z" },
     "test-creator": { "status": "complete", "at": "2026-06-27T23:25:00Z", "note": "14 tests across remediation_s1_d1.rs + probe hang-modes + report_cwd + cwd fixtures. Gate verified by orchestrator: fmt+clippy clean; 117 passed / 12 failed / 4 ignored; the 12 reds are exactly the new S-1(7)+D-1(5) contract tests; 2 new (unset-cwd, http-ignores-cwd) green by inheritance; 115 existing green; 6.9s no-hang." },
-    "implementer": { "status": "pending", "at": null },
+    "implementer": { "status": "complete", "at": "2026-06-27T23:40:00Z", "note": "gpt-5.5. S-1: real timeout(effective, connect_future) around spawn+serve+initial list; ContainmentGuard local in connect drops on cancel (during-window test green); ensure_fresh refetch timeout re-marks dirty + preserves cache; no entry cached on timeout, init guard releases; public code upstream_timeout reused. D-1: ServerConfig.cwd Option<String>, StartupError::EmptyCwd at config-load, blank-resolved rejected at connect (UpstreamConnect), current_dir stdio-only, HTTP ignores. Orchestrator-verified: fmt+clippy clean, 134/0/4, no test edits, no gaming." },
     "reviewer": { "status": "pending", "at": null },
     "simplifier": { "status": "pending", "at": null }
   }

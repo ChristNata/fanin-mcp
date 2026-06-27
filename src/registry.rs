@@ -128,9 +128,48 @@ impl Registry {
             }
             resolved_headers.insert(name.clone(), resolved);
         }
+        let resolved_cwd = if server_config.transport_kind() == "stdio" {
+            match server_config.cwd.as_deref() {
+                Some(raw) => {
+                    let resolved =
+                        crate::process::resolve_env_value(&*store, cred_choice, server, raw)?;
+                    if resolved.trim().is_empty() {
+                        return Err(ToolError::UpstreamConnect {
+                            server: server.to_string(),
+                            message: "resolved cwd is empty or whitespace-only".to_string(),
+                        });
+                    }
+                    Some(resolved)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
 
-        let entry =
-            Arc::new(connect(server, server_config, &resolved_env, &resolved_headers).await?);
+        let effective = self.effective_timeout(server);
+        let connect_future = connect(
+            server,
+            server_config,
+            &resolved_env,
+            &resolved_headers,
+            resolved_cwd.as_deref(),
+        );
+        let entry = Arc::new(match timeout(effective, connect_future).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    server,
+                    event = "upstream_failure",
+                    code = "timeout",
+                    "upstream connect timed out"
+                );
+                return Err(ToolError::UpstreamTimeout {
+                    server: server.to_string(),
+                    tool: String::new(),
+                });
+            }
+        });
         self.entries
             .write()
             .await
@@ -278,11 +317,25 @@ impl Registry {
         // IMPORTANT: do NOT hold any registry map lock here.
         // We hold only the cloned Arc<Entry> (map lock already dropped).
         // Also do NOT hold entry.tools across the await.
-        let fresh = match entry.service.peer().list_all_tools().await {
-            Ok(list) => list,
-            Err(e) => {
+        let effective = self.effective_timeout(server);
+        let fresh = match timeout(effective, entry.service.peer().list_all_tools()).await {
+            Ok(Ok(list)) => list,
+            Ok(Err(e)) => {
                 entry.dirty.store(true, Ordering::Relaxed);
                 return Err(map_service_error(e, server, "")); // empty tool: matches prior observable for ensure_fresh
+            }
+            Err(_elapsed) => {
+                entry.dirty.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    server,
+                    event = "upstream_failure",
+                    code = "timeout",
+                    "upstream inventory refetch timed out"
+                );
+                return Err(ToolError::UpstreamTimeout {
+                    server: server.to_string(),
+                    tool: String::new(),
+                });
             }
         };
 
@@ -343,6 +396,7 @@ async fn connect(
     config: &ServerConfig,
     resolved_env: &std::collections::HashMap<String, String>,
     resolved_headers: &std::collections::HashMap<String, String>,
+    resolved_cwd: Option<&str>,
 ) -> Result<UpstreamEntry, ToolError> {
     let log_file = config.log_file.as_ref().map(std::path::PathBuf::from);
     tracing::info!(
@@ -364,7 +418,12 @@ async fn connect(
     let handler = UpstreamClientHandler::new(server, log_file, dirty.clone());
     let service = match config.transport_kind() {
         "stdio" => {
-            let spawned = crate::process::spawn_stdio_transport(server, config, resolved_env)
+            let spawned = crate::process::spawn_stdio_transport(
+                server,
+                config,
+                resolved_env,
+                resolved_cwd,
+            )
                 .map_err(|e| {
                     tracing::warn!(server, event = "upstream_connect_failure", error = %e, "upstream spawn failed");
                     ToolError::UpstreamConnect {
