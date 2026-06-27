@@ -24,6 +24,7 @@ mod gate;
 mod http_upstream;
 mod invoke;
 mod list_changed;
+mod literal_header_redaction;
 mod manual_e2e;
 mod multi_upstream;
 mod namespace_acl;

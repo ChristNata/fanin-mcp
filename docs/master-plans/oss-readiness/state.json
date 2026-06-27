@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "test-creator",
+  "current_step": "implementer",
   "decisions": {
     "O-2-security-contact": "GitHub Security Advisories private vulnerability reporting (no email exposed). User-confirmed.",
     "O-1-publish": "Add all [package] metadata AND flip publish=true now (LICENSE + dual-license present). Version stays 0.1.0 for the release process. User-confirmed.",
@@ -15,7 +15,7 @@
   "origin": "Closes the remaining full-codebase-review findings after remediation-s1-d1: O-1/O-2/O-3 (OSS-release blockers), D-2 (passthrough-stderr drift), H-1..H-8 (hardening + hygiene). Source: docs/master-plans/full-codebase-review/review-SYNTHESIS.md.",
   "steps": {
     "planner": { "status": "complete", "at": "2026-06-28T00:25:00Z", "note": "grok-4.3 (gpt-5.5 first attempt idle-timed-out mid-read at step 12 — transient, dispatch-level; fell back to grok-4.3 per model-list). 4 phases A(docs/metadata) B(hardening H-1/2/3) C(hygiene H-4/5/6 + D-2) D(test-hooks H-7). All 4 open questions now resolved in decisions{} above." },
-    "test-creator": { "status": "pending", "at": null },
+    "test-creator": { "status": "complete", "at": "2026-06-28T00:35:00Z", "note": "grok-4.3. 1 new behavioral test: literal_header_redaction (H-3). H-2 cap = inspection-only (rmcp server API can't emit a >=200-char name via the probe). H-1/H-4/H-5/H-6/D-2/O-* = inspection or existing-green-gated. Gate verified: fmt+clippy clean; new test RED, 134 existing green." },
     "implementer": { "status": "pending", "at": null },
     "reviewer": { "status": "pending", "at": null },
     "simplifier": { "status": "pending", "at": null }
