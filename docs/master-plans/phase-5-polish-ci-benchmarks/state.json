@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "simplifier",
+  "current_step": "knowledge-sync",
   "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main at end of cycle)",
   "decisions": {
     "macos-hardkill": "Documented limitation — Linux PDEATHSIG + Windows suspended-spawn are crash-safe; macOS graceful process-group teardown only, SIGKILL-orphan gap documented (no daemon/supervisor/kqueue). User-accepted default.",
@@ -27,8 +27,9 @@
       "deferred_to_knowledge_sync": "plan-Phase-7 doc reconciliation (SECURITY macOS limitation, AggError->ToolError DRIFT-1, rmcp-general feature-name OQ3 fix, STACK.md HTTP-client deps, README framing)"
     },
     "simplifier": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T11:40:00Z",
+      "note": "grok-4.3. Behavior-preserving. Fixed review F1 (self-Job doc comments) + F2 (dead_code rationale) in src/process.rs; found nothing else worth changing (impl already minimal, no invented churn). Suite 115/0/4, fmt+clippy clean."
     },
     "reviewer": {
       "status": "complete",

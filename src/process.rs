@@ -135,8 +135,11 @@ type LogKey = (PathBuf, String);
 
 static LOG_WRITERS: OnceLock<Mutex<HashMap<LogKey, mpsc::Sender<String>>>> = OnceLock::new();
 
-/// Retained process-tree containment for the fanin-mcp process itself.
+/// Outer process-tree containment for fanin-mcp itself.
+/// Upstream containment is provided by the process-wrap `JobObject` wrapper
+/// (suspended-spawn + KILL_ON_JOB_CLOSE); this is an additional outer guard.
 #[allow(dead_code)]
+// retained solely for Drop (KILL_ON_JOB_CLOSE on self)
 #[derive(Debug)]
 pub enum ProcessTreeGuard {
     #[cfg(windows)]
@@ -257,9 +260,11 @@ pub fn spawn_stdio_transport(
 
     // Phase 5: process-wrap's Windows JobObject wrapper creates the child
     // suspended, assigns it to a kill-on-close Job Object, then resumes it.
-    // That closes the old post-spawn AssignProcessToJobObject race. Unix keeps
-    // ProcessSession for graceful group teardown; Linux additionally installs
-    // PR_SET_PDEATHSIG above so a hard-killed parent takes the child with it.
+    // That closes the old post-spawn AssignProcessToJobObject race (CARRY-1).
+    // The self-Job (above) is an outer containment for fanin itself; upstreams
+    // use the per-process JobObject wrapper. Unix keeps ProcessSession for
+    // graceful group teardown; Linux additionally installs PR_SET_PDEATHSIG
+    // above so a hard-killed parent takes the child with it.
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(windows)]
     {
