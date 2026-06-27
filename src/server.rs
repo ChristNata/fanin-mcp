@@ -380,7 +380,7 @@ fn parse_server_tool(name: &str) -> Option<(&str, &str)> {
 ///   result content (see D-004 / GOTCHA #4). Dispatch and namespace checks
 ///   continue to use the real upstream tool name from the registry inventory.
 fn sanitize_upstream_text(s: &str) -> String {
-    // Replace every control with a single space (produces single-line, control-free).
+    // Replace every C0 control and DEL with space → single-line, control-free.
     let stripped: String = s
         .chars()
         .map(|c| {
@@ -393,22 +393,10 @@ fn sanitize_upstream_text(s: &str) -> String {
         })
         .collect();
 
-    // Cap after stripping. Use char count (Unicode scalars), not bytes.
+    // Trim (cleans boundary controls), then cap at 100 Unicode scalars.
+    // Cap AFTER strip; char iterator never splits multibyte.
     const CAP: usize = 100;
-    let mut capped: String = stripped.chars().take(CAP).collect();
-
-    // If we introduced leading/trailing spaces from boundary controls, trim the outer ones
-    // only for cleanliness; inner runs are left (tests do not require collapse).
-    // Trimming does not affect control-freedom or the cap (trim happens after take).
-    let trimmed = capped.trim();
-    if trimmed.len() != capped.len() {
-        // Re-apply cap after trim if needed (trim can only shorten).
-        capped = trimmed.chars().take(CAP).collect();
-    } else {
-        capped = trimmed.to_string();
-    }
-
-    capped
+    stripped.trim().chars().take(CAP).collect()
 }
 
 /// Recursively sanitize string values that appear under upstream-authored

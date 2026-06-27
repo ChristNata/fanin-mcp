@@ -168,27 +168,9 @@ impl Registry {
         match timeout(effective, call_fut).await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(e)) => {
-                // Detect mid-session upstream death (closed transport) distinctly
-                // from a live upstream reporting a tool-level failure.
-                // rmcp 1.8.0: peer().call_tool returns Result<_, ServiceError>.
-                // ServiceError::TransportClosed is the variant for a closed/broken
-                // transport (dead process, closed stdio pipe). We map THAT to
-                // UpstreamDisconnected (per state.json: no silent reconnect).
-                // Genuine tool failures from a live upstream remain UpstreamCall.
-                // Lock discipline preserved: we already hold only the cloned Arc
-                // here; map lock was dropped inside get_or_connect.
-                if matches!(e, ServiceError::TransportClosed) {
-                    Err(ToolError::UpstreamDisconnected {
-                        server: server.to_string(),
-                        tool: tool.to_string(),
-                    })
-                } else {
-                    Err(ToolError::UpstreamCall {
-                        server: server.to_string(),
-                        tool: tool.to_string(),
-                        message: e.to_string(),
-                    })
-                }
+                // TransportClosed → UpstreamDisconnected (distinct from live-call failure).
+                // No map lock held across the await (D-007).
+                Err(map_service_error(e, server, tool))
             }
             Err(_elapsed) => Err(ToolError::UpstreamTimeout {
                 server: server.to_string(),
@@ -246,20 +228,7 @@ impl Registry {
         // Also do NOT hold entry.tools across the await.
         let fresh = match entry.service.peer().list_all_tools().await {
             Ok(list) => list,
-            Err(e) => {
-                // Treat transport death distinctly (same policy as call_tool).
-                if matches!(e, ServiceError::TransportClosed) {
-                    return Err(ToolError::UpstreamDisconnected {
-                        server: server.to_string(),
-                        tool: String::new(),
-                    });
-                }
-                return Err(ToolError::UpstreamCall {
-                    server: server.to_string(),
-                    tool: String::new(),
-                    message: e.to_string(),
-                });
-            }
+            Err(e) => return Err(map_service_error(e, server, "")), // empty tool: matches prior observable for ensure_fresh
         };
 
         // Briefly hold only the per-entry tools lock to install the fresh list.
@@ -268,6 +237,25 @@ impl Registry {
             *guard = fresh;
         }
         Ok(())
+    }
+}
+
+/// Map a rmcp `ServiceError` from an upstream operation to the appropriate
+/// `ToolError`, distinguishing transport death (mid-session disconnect)
+/// from ordinary call failures. Preserves the exact observable strings
+/// and the empty-tool convention used by `ensure_fresh`.
+fn map_service_error(e: ServiceError, server: &str, tool: &str) -> ToolError {
+    if matches!(e, ServiceError::TransportClosed) {
+        ToolError::UpstreamDisconnected {
+            server: server.to_string(),
+            tool: tool.to_string(),
+        }
+    } else {
+        ToolError::UpstreamCall {
+            server: server.to_string(),
+            tool: tool.to_string(),
+            message: e.to_string(),
+        }
     }
 }
 
