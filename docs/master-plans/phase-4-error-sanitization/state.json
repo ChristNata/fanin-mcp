@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "THOROUGH",
-  "current_step": "knowledge-sync",
+  "current_step": "complete",
   "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main)",
   "decisions": {
     "error-type-name": "Keep ToolError; finalize coverage + add upstream_disconnected code (no rename) — OQ1 default accepted.",
@@ -16,7 +16,7 @@
     "implement": { "status": "complete", "at": "2026-06-27T00:55:00Z" },
     "simplify": { "status": "complete", "at": "2026-06-27T01:05:00Z" },
     "review": { "status": "complete", "at": "2026-06-27T01:30:00Z", "verdict": "PASS-with-issues", "findings": "5 targeted (F1-F5) routed to test-creator + debugger; all resolved in-cycle (F4 wire-test deferred, code fixed)" },
-    "push": { "status": "pending", "at": null },
-    "knowledge-sync": { "status": "pending", "at": null }
+    "push": { "status": "complete", "at": "2026-06-27T01:40:00Z" },
+    "knowledge-sync": { "status": "complete", "at": "2026-06-27T01:45:00Z", "tier": "THOROUGH" }
   }
 }
