@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "knowledge-sync",
+  "current_step": "complete",
   "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main at end of cycle)",
   "decisions": {
     "macos-hardkill": "Documented limitation — Linux PDEATHSIG + Windows suspended-spawn are crash-safe; macOS graceful process-group teardown only, SIGKILL-orphan gap documented (no daemon/supervisor/kqueue). User-accepted default.",
@@ -38,8 +38,10 @@
       "findings": "3-lens (alignment/adversarial/general). 0 blocker, 0 structural, 2 targeted (F1 process.rs self-Job doc-comment overstatement; F2 dead_code rationale comment) — both non-behavioral, folded into simplify stage. gpt-5.5 quota-exhausted mid-stage; lenses re-run on grok-4.3. general lens returned PASS/0 but did not materialize review-general.md (process hiccup; corroborated by alignment)."
     },
     "knowledge-sync": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T11:55:00Z",
+      "tier": "THOROUGH",
+      "note": "Absorbed plan-Phase-7 docs. 5 doc files reconciled (SECURITY macOS-limitation + HTTP-client supply-chain; rmcp-general + STACK feature-name OQ3; ARCHITECTURE AggError->ToolError DRIFT-1; GOTCHA #11/#14 containment honesty). README token block done in-cycle by P5. 2 stale-doc flags surfaced for the user (MVP checklist sign-off, ROADMAP v1.0 status). No merge step (linear-on-main)."
     }
   }
 }

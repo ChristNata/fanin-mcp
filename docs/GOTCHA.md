@@ -28,7 +28,7 @@ Quick-reference trap list for anyone (human or agent) touching this codebase. Fo
 
 ## Windows (primary platform)
 
-11. **Zombie `node.exe` processes accumulate until reboot.** npm servers must spawn as `cmd /c npx ...`; killing `cmd.exe` does **not** kill its children on Windows. The classic MCP-on-Windows complaint. → Job Object with kill-on-close around every spawned tree; hard-kill CI test asserts zero survivors. ✅ (D-009)
+11. **Zombie `node.exe` processes accumulate until reboot.** npm servers must spawn as `cmd /c npx ...`; killing `cmd.exe` does **not** kill its children on Windows. The classic MCP-on-Windows complaint. → Job Object with kill-on-close around every spawned tree; hard-kill CI test asserts zero survivors. ✅ (D-009). **Spawn-then-assign race (closed in Phase 5):** assigning the child to the Job Object *after* it is already running leaves a window where a descendant forked at startup escapes `KILL_ON_JOB_CLOSE`. → The child is created **suspended** (`CREATE_SUSPENDED` via process-wrap), assigned to the Job Object, then resumed — no window. Regression test forks a descendant immediately at startup. ✅
 
 12. **`Command::new("npx")` fails with "file not found" on Windows.** `npx` is a `.cmd` script, not an executable. → `cmd /c` wrapper (inside the Job Object — see #11).
 
@@ -36,7 +36,7 @@ Quick-reference trap list for anyone (human or agent) touching this codebase. Fo
 
 13. **`cred set` fails on a headless Linux box / container / WSL.** No D-Bus / Secret Service available for the keyring. → The resolution chain falls back to process env automatically; error messages must say *which backend* failed and point at the env fallback. ✅
 
-14. **An upstream that forks survives session teardown.** Kill-on-drop only hits the direct child. → Fresh process group per spawn (`setsid`); teardown kills the group. ✅ (D-009's Unix half)
+14. **An upstream that forks survives session teardown.** Kill-on-drop only hits the direct child. → Fresh process group per spawn (`setsid`) kills the group on *graceful* teardown. ✅ But `setsid` alone does NOT cover a **hard kill** (`kill -9`) of `fanin-mcp` — `Drop`/kill-on-drop never runs on `SIGKILL`, so nothing signals the group. → **Linux (Phase 5):** each child sets `prctl(PR_SET_PDEATHSIG, SIGKILL)` in `pre_exec`, so the kernel kills it when the parent dies — crash-safe. ✅ (D-009's Unix half). **macOS:** no `PDEATHSIG` equivalent; only the graceful path is guaranteed — a hard-kill of `fanin-mcp` on macOS **may leave orphans**. This is a *documented MVP limitation* (no supervisor/daemon — the "no daemon" non-goal), recorded in SECURITY.md; macOS is excluded from the hard-kill zero-orphan test claim (`#[cfg(any(windows, target_os = "linux"))]`). Prefer graceful shutdown on macOS. ⚠️
 
 ## Naming & Parsing
 

@@ -32,8 +32,13 @@ builders, transports. The repo policy (D-015, GOTCHA #23):
 - Bumping the pin is a deliberate change with a changelog note, never an
   incidental `cargo update`.
 
-Features in play: `server`, `client`, `transport-child-process`,
-`transport-streamable-http`.
+Features in play: `server`, `client`, `transport-io`,
+`transport-child-process`, and — for remote Streamable-HTTP upstreams —
+`transport-streamable-http-client` + `transport-streamable-http-client-reqwest`
+(the reqwest-backed client). Note the **`-client`** suffix: there is no bare
+`transport-streamable-http` feature at the `=1.8.0` pin (that name would be the
+*server* side). Verified against the pin in Phase 5; see the phase-5 plan
+workspace `oq3-http-transport-findings.md`.
 
 ## stdout is the transport
 

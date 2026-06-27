@@ -15,7 +15,7 @@ Every dependency must justify itself — the small tree is a security feature we
 
 | Crate | Purpose | Why this one |
 |-------|---------|--------------|
-| `rmcp` (exact pin) | MCP protocol — **both** roles | Official SDK; features: `server`, `client`, `transport-child-process`, `transport-streamable-http`. The proxy is a server downstream and a client upstream in one process |
+| `rmcp` (exact pin) | MCP protocol — **both** roles | Official SDK; features: `server`, `client`, `transport-io`, `transport-child-process`, and `transport-streamable-http-client` + `transport-streamable-http-client-reqwest` for remote upstreams (the `-client` variant — bare `transport-streamable-http` is the server side). The proxy is a server downstream and a client upstream in one process |
 | `tokio` | Async runtime | rmcp requirement; `tokio::time::timeout` wraps every upstream call; `RwLock`/`Mutex` for the registry discipline (D-007) |
 | `serde`, `serde_json` | Serialization | Raw `Value` passthrough of tool arguments/results (D-004); `AggError` serialization |
 | `toml` | Config parsing | Human-writable config is a product requirement |
@@ -27,7 +27,7 @@ Every dependency must justify itself — the small tree is a security feature we
 | `dirs` | Platform paths | Config (`%APPDATA%` / `~/.config`) and the v1.1 cache dir |
 | `schemars` | JSON Schema helpers | Meta-tool input schemas (manual construction preferred over `#[tool]` macros — see AGG-MCP.md) |
 
-**Transitive-only, tolerated:** `rustls` (pulled by rmcp's HTTP transport for HTTPS remotes). Windows Job Object bindings (`windows`/`win32job`) only if `process-wrap` proves un-integrable.
+**Transitive-only, tolerated:** the reqwest/hyper HTTP-**client** tree (`reqwest`, `hyper`, `tower`/`tower-http`, `url`, the ICU/idna stack) pulled by rmcp's `transport-streamable-http-client-reqwest` for remote upstreams — a client, not a listener, so the no-HTTP-server identity holds; TLS (`rustls`) is only linked when a real remote needs HTTPS (trimmed for the loopback test path). Direct add: `http` (for `HeaderName`/`HeaderValue`) and target-gated `libc` on Linux (for `PR_SET_PDEATHSIG`). The whole tree stays under the `< 10 MB` stripped-binary budget (CI-checked; measured 8.27 MB) and passes `cargo deny`. Windows Job Object bindings come via `process-wrap` (no separate `windows`/`win32job` needed).
 
 ## Anti-Stack (deliberately absent)
 

@@ -138,7 +138,7 @@ struct Registry {
 4. Each call is wrapped in `tokio::time::timeout(server.timeout_secs)` → `upstream_timeout` structured error on expiry. Client cancellation notifications are forwarded to in-flight upstream calls.
 5. `tools/list` fetched and cached per session; invalidated on upstream `notifications/tools/list_changed`.
 
-**Error isolation:** each upstream connection runs in its own task; a panic or hang in one upstream never affects others or crashes the aggregator. All failures become structured `AggError` results.
+**Error isolation:** each upstream connection runs in its own task; a panic or hang in one upstream never affects others or crashes the aggregator. All failures become structured `ToolError` results (see the naming note under `error.rs` below — the wire shape, not the Rust type name, is the public contract).
 
 **Teardown:** stdin EOF → drop all handles → process module guarantees full-tree kill (see `process.rs`).
 
@@ -211,6 +211,8 @@ struct AggError {
 ```
 
 Serialized as JSON in `CallToolResult { isError: true }` — never JSON-RPC errors — keeping the error in conversation where the LLM can reason about it. **Empirically verified on both CC and OC** that such results reach the model as readable content with the JSON intact.
+
+> **Naming note (shipped):** the snippet above is illustrative. The shipped Rust type is **`ToolError`** (not `AggError`/`ErrorCode`), per the accepted OQ1 decision in the Phase-4 plan. The **public contract is the wire shape** (the `server`/`tool`/`code`/`message`/`recoverable` JSON fields and the `code` string values — `upstream_timeout`, `namespace_denied`, `upstream_disconnected`, `credential_resolution_failed`, …), which is what D-005 fixes; the internal Rust type name is an implementation detail. Phase 5 added `upstream_disconnected` (mid-session upstream death) and the HTTP path surfaces `credential_resolution_failed` within the same envelope.
 
 ## Data Flow: Tool Invocation
 

@@ -25,6 +25,7 @@ This document states honestly what fanin-mcp protects against, what it cannot, a
 3. **Least-privilege injection.** Credential env vars are injected per-child at spawn time; no upstream inherits the aggregator's full environment or another server's secrets.
 4. **No secrets on disk outside the keychain.** Ever. The v1.1 tool-list disk cache contains tool metadata only, never credentials, and is fully reconstructible.
 5. **Credential backend chain.** `--credential-store` selects the *preferred* backend (default: keyring); the process environment is always the fallback (headless Linux, CI, containers). Failures state which backend failed and why.
+6. **Process-tree containment.** Every upstream is spawned into a kill-on-close container so tearing down `fanin-mcp` reaps the whole tree, including grandchildren (e.g. the `cmd /c npx ...` → `node.exe` shape on Windows). On **Windows** the child is created suspended, assigned to a `KILL_ON_JOB_CLOSE` Job Object, then resumed — closing the spawn-then-assign race so a descendant forked during startup cannot escape; on **Linux** each child sets `PR_SET_PDEATHSIG = SIGKILL`, so the kernel kills it even if `fanin-mcp` is itself `kill -9`'d. Both paths are **crash-safe** and CI-tested (hard-kill orphan test, all OSes). **macOS limitation (honest):** macOS has no `PDEATHSIG` equivalent; containment covers the *graceful* teardown path (stdin-EOF / process-group), but a **hard kill (`SIGKILL`) of `fanin-mcp` on macOS may leave upstream processes orphaned**. This is a documented MVP limitation — fanin-mcp does not run a supervisor/daemon to close it (per the "no daemon" non-goal). On macOS, prefer a graceful shutdown.
 
 ## Access Control Reality
 
@@ -60,7 +61,7 @@ postgres = ["query", "list_tables"]  # write tools (insert, update, ...) are the
 
 - `Cargo.lock` committed; `rmcp` and all dependencies pinned.
 - `cargo audit` and `cargo deny` run in CI on every commit.
-- Deliberately minimal dependency tree (no web framework, no database, no TLS stack unless a remote upstream requires HTTPS).
+- Deliberately minimal dependency tree (no web framework, no database). Remote Streamable-HTTP upstreams pull a reqwest/hyper **HTTP client** (a client, never a listener — the no-daemon/no-port non-goal holds); for the loopback test path TLS features are trimmed, and a TLS stack is only linked when a real remote upstream requires HTTPS. `cargo deny` (licenses/bans/sources) and the `< 10 MB` stripped-binary budget keep the tree honest in CI.
 - Release binaries published with checksums and signatures.
 - Reproducible release builds are a goal; deviations documented.
 
