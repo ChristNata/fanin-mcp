@@ -112,7 +112,20 @@ jobs:
           }
 
       - name: Audit advisories
-        run: cargo audit
+        shell: bash
+        run: |
+          # Work around a malformed upstream RustSec advisory
+          # (anchor-lang/RUSTSEC-2026-0146.md — an unrelated crate NOT in our
+          # dependency tree) that crashes cargo-audit's DB parser before it can
+          # check our Cargo.lock. Clone the advisory DB, drop the one bad file,
+          # then audit offline. REMOVE this workaround once RustSec fixes the
+          # upstream entry (then: `run: cargo audit`).
+          rm -rf advisory-db
+          git clone --depth 1 https://github.com/rustsec/advisory-db advisory-db
+          rm -f advisory-db/crates/anchor-lang/RUSTSEC-2026-0146.md
+          cargo audit --no-fetch --db advisory-db
 
-      - name: Check deny policy
-        run: cargo deny check
+      - name: Check deny policy (bans/licenses/sources)
+        # Advisories are covered by `cargo audit` above; skip deny's advisories
+        # check so it does not re-parse the same malformed upstream DB entry.
+        run: cargo deny check bans licenses sources

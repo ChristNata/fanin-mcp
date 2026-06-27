@@ -94,6 +94,11 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }
+
+# libc is needed on ALL Unix: killpg (process-group teardown, macOS + Linux) and
+# prctl/PR_SET_PDEATHSIG (Linux only, cfg-gated in code). macOS uses the Apple
+# Keychain (no libdbus), so this stays minimal.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

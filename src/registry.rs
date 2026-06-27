@@ -351,7 +351,7 @@ async fn connect(
         "upstream connect starting"
     );
 
-    let containment = crate::process::ContainmentGuard::Retained;
+    let containment = crate::process::ContainmentGuard::Inert;
     let _ = containment.is_retained(); // retained for platform guard; value asserted below after spawn
 
     // Create the per-server dirty flag BEFORE the handler so we can share it.

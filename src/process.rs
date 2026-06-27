@@ -291,9 +291,9 @@ pub fn spawn_stdio_transport(
     let containment = transport
         .id()
         .map(|pid| ContainmentGuard::Unix { pgid: pid as i32 })
-        .unwrap_or(ContainmentGuard::UnixInert);
+        .unwrap_or(ContainmentGuard::Inert);
     #[cfg(not(unix))]
-    let containment = ContainmentGuard::Retained;
+    let containment = ContainmentGuard::Inert;
 
     Ok(SpawnedTransport {
         transport,
@@ -378,14 +378,15 @@ pub struct SpawnedTransport {
 /// Platform process-tree containment retained alongside the upstream service.
 #[derive(Debug)]
 pub enum ContainmentGuard {
+    /// No active OS-level teardown by this guard: HTTP upstreams (no process),
+    /// Windows stdio (the kill-on-close Job Object lives in the transport
+    /// wrapper), and the Unix no-PID fallback. Drop is a no-op.
+    Inert,
+    /// Unix stdio upstream: the child is its own session/group leader
+    /// (`ProcessSession` → `setsid`), so `pgid == pid`. Drop kills the whole
+    /// group, reaping grandchildren on graceful teardown.
     #[cfg(unix)]
     Unix { pgid: i32 },
-    #[cfg(unix)]
-    UnixInert,
-    #[cfg(windows)]
-    Retained,
-    #[cfg(not(any(unix, windows)))]
-    Retained,
 }
 
 impl ContainmentGuard {
