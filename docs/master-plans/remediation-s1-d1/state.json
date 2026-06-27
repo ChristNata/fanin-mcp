@@ -1,0 +1,16 @@
+{
+  "feature": "remediation-s1-d1",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "test-creator",
+  "cycle_model": "linear-on-main (no worktree/PR/merge; checkpoint commits to main, one end-of-cycle push only after user confirms)",
+  "origin": "Spun from docs/master-plans/full-codebase-review/review-SYNTHESIS.md — remediates S-1 (unbounded upstream connect/discovery/refetch outside timeout_secs, D-012 violation) and D-1 (documented per-server cwd field unimplemented).",
+  "steps": {
+    "planner": { "status": "complete", "at": "2026-06-27T23:00:00Z" },
+    "test-creator": { "status": "pending", "at": null },
+    "implementer": { "status": "pending", "at": null },
+    "reviewer": { "status": "pending", "at": null },
+    "simplifier": { "status": "pending", "at": null }
+  }
+}
