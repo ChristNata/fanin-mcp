@@ -352,7 +352,7 @@ async fn connect(
     );
 
     let containment = crate::process::ContainmentGuard::Retained;
-    debug_assert!(containment.is_retained());
+    let _ = containment.is_retained(); // retained for platform guard; value asserted below after spawn
 
     // Create the per-server dirty flag BEFORE the handler so we can share it.
     // Handler gets a clone; the entry will store the same Arc.

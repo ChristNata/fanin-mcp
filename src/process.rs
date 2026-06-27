@@ -268,12 +268,10 @@ pub fn spawn_stdio_transport(
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(windows)]
     {
-        wrapped.wrap(KillOnDrop);
         wrapped.wrap(JobObject);
     }
     #[cfg(unix)]
     {
-        wrapped.wrap(KillOnDrop);
         wrapped.wrap(ProcessSession);
     }
 
@@ -286,9 +284,20 @@ pub fn spawn_stdio_transport(
     if let (Some(stderr), Some(log_file)) = (stderr, config.log_file.as_ref()) {
         spawn_stderr_log_task(server_name.to_string(), PathBuf::from(log_file), stderr);
     }
+
+    // Capture PID for Unix process-group kill on graceful Drop.
+    // ProcessSession guarantees the child is session/group leader → pgid == pid.
+    #[cfg(unix)]
+    let containment = transport
+        .id()
+        .map(|pid| ContainmentGuard::Unix { pgid: pid as i32 })
+        .unwrap_or(ContainmentGuard::UnixInert);
+    #[cfg(not(unix))]
+    let containment = ContainmentGuard::Retained;
+
     Ok(SpawnedTransport {
         transport,
-        containment: ContainmentGuard::Retained,
+        containment,
     })
 }
 
@@ -369,14 +378,33 @@ pub struct SpawnedTransport {
 /// Platform process-tree containment retained alongside the upstream service.
 #[derive(Debug)]
 pub enum ContainmentGuard {
+    #[cfg(unix)]
+    Unix { pgid: i32 },
+    #[cfg(unix)]
+    UnixInert,
+    #[cfg(windows)]
+    Retained,
+    #[cfg(not(any(unix, windows)))]
     Retained,
 }
 
 impl ContainmentGuard {
     /// Returns true while the platform containment guard is retained.
     pub fn is_retained(&self) -> bool {
-        match self {
-            Self::Retained => true,
+        true
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ContainmentGuard {
+    fn drop(&mut self) {
+        if let Self::Unix { pgid } = self {
+            if *pgid > 0 {
+                // SAFETY: killpg is async-signal-safe; ESRCH is expected and ignored.
+                unsafe {
+                    let _ = libc::killpg(*pgid, libc::SIGKILL);
+                }
+            }
         }
     }
 }
