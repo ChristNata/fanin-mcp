@@ -6,7 +6,7 @@ use std::process::Stdio;
 
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 use process_wrap::tokio::KillOnDrop;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
@@ -273,6 +273,7 @@ pub fn spawn_stdio_transport(
     }
     #[cfg(unix)]
     {
+        wrapped.wrap(KillOnDrop);
         wrapped.wrap(ProcessSession);
     }
 
@@ -314,6 +315,7 @@ pub fn spawn_immediate_descendant(
     }
     #[cfg(unix)]
     {
+        wrapped.wrap(KillOnDrop);
         wrapped.wrap(ProcessSession);
     }
 

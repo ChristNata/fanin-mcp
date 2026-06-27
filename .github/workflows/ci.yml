@@ -66,6 +66,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings -A clippy::uninlined_format_args
 
+      # Token benchmark runs BEFORE integration tests: it writes
+      # target/token-figures.generated.md, which token_figures.rs asserts the
+      # README block matches. Tests would fail if the generated file is absent.
+      - name: Token benchmark
+        run: cargo bench --bench token_cost
+
       - name: Integration tests
         run: cargo test --test integration
 
@@ -110,6 +116,3 @@ jobs:
 
       - name: Check deny policy
         run: cargo deny check
-
-      - name: Token benchmark
-        run: cargo bench --bench token_cost
