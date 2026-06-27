@@ -286,6 +286,45 @@ async fn hard_kill_orphan_test_no_surviving_descendants() {
     let _ = std::fs::remove_file(&marker_path);
 }
 
+/// Phase 5 P2.SC1/P2.SC3: the probe forks a descendant immediately at child
+/// startup, before MCP initialization completes. This specifically catches the
+/// Windows spawn-then-assign Job Object race and the Linux crash-safe parent-
+/// death path during the test window. macOS is excluded from the hard-kill
+/// zero-orphan claim by plan decision; its graceful path is tested below.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tokio::test]
+async fn hard_kill_kills_immediate_startup_descendant_during_test_window() {
+    let marker_path = fx::grandchild_marker_path();
+    let cfg = fx::ConfigBuilder::new()
+        .args(["--spawn-immediate-descendant", marker_path.as_str()])
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    common::initialize(&mut child).await;
+
+    // The immediate descendant writes its PID at startup. Poll briefly so the
+    // setup is deterministic before the hard kill; do not wait for cargo-test
+    // process cleanup, which masks orphan state under the runner job.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(3) {
+        if std::fs::metadata(&marker_path).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let descendant_pid = parse_grandchild_pid(&marker_path);
+    assert!(
+        process_is_alive(descendant_pid),
+        "immediate startup descendant must be alive before fanin-mcp is hard-killed"
+    );
+
+    child.into_guard().kill_and_wait().await;
+    assert!(
+        wait_for_process_death(descendant_pid, CLEANUP_INTERVAL).await,
+        "after hard-killing fanin-mcp, immediate startup descendant pid {descendant_pid} must be dead within {CLEANUP_INTERVAL:?}"
+    );
+    let _ = std::fs::remove_file(&marker_path);
+}
+
 /// Master SC 22: normal stdin-EOF teardown also terminates the full upstream
 /// tree. A clean shutdown (close stdin => EOF => fanin-mcp exits) must kill
 /// the spawned upstream AND any descendants, not just the aggregator.

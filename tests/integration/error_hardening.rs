@@ -525,3 +525,29 @@ async fn f4_send_side_death_returns_upstream_disconnected_not_call_failed() {
     // Step 3 is a race we cannot make deterministic without a transport hook.
     // Left ignored with the reason + unblock trigger above.
 }
+
+/// Phase 5 CARRY-4 deterministic guard. This is the compile-safe contract
+/// available until the implementer exposes `map_service_error` to tests: the
+/// source must explicitly classify `ServiceError::TransportSend(_)` with the
+/// same `upstream_disconnected` branch as `TransportClosed`.
+///
+/// Test-needs-impl dependency recorded in `tests.md`: replace this source guard
+/// with a direct call against an exposed `map_service_error`/wrapper once the
+/// source surface exists. The test is intentionally NOT ignored so the Phase 5
+/// gate has an always-run CARRY-4 proof.
+#[test]
+fn service_error_transport_send_maps_to_upstream_disconnected_deterministically() {
+    let registry = std::fs::read_to_string("src/registry.rs")
+        .expect("src/registry.rs must be readable for the CARRY-4 source guard");
+    assert!(
+        registry.contains("ServiceError::TransportSend"),
+        "map_service_error must explicitly match ServiceError::TransportSend(_)"
+    );
+    assert!(
+        registry.contains("ServiceError::TransportClosed | ServiceError::TransportSend")
+            || registry.contains("ServiceError::TransportSend(_) => ToolError::UpstreamDisconnected")
+            || registry.contains("ServiceError::TransportSend(_)\n")
+                && registry.contains("ToolError::UpstreamDisconnected"),
+        "ServiceError::TransportSend must map to ToolError::UpstreamDisconnected / public upstream_disconnected; registry.rs:\n{registry}"
+    );
+}

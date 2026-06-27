@@ -998,6 +998,16 @@ async fn main() -> std::process::ExitCode {
         return run_grandchild(args.marker_path, args.lifetime).await;
     }
 
+    // Phase 5 CARRY-1 fixture: fork the descendant immediately at probe
+    // startup, before MCP initialization. This hits the Windows
+    // spawn-then-assign race window that a tool-triggered grandchild misses.
+    if let Some(marker_path) = parse_immediate_descendant_arg() {
+        if let Err(e) = spawn_immediate_descendant(&marker_path) {
+            eprintln!("probe-server: failed to spawn immediate descendant: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
+
     init_tracing();
 
     let probe = Probe;
@@ -1015,6 +1025,38 @@ async fn main() -> std::process::ExitCode {
     }
 
     std::process::ExitCode::SUCCESS
+}
+
+const IMMEDIATE_DESCENDANT_ARG: &str = "--spawn-immediate-descendant";
+
+fn parse_immediate_descendant_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == IMMEDIATE_DESCENDANT_ARG {
+            return args.next();
+        }
+    }
+    None
+}
+
+fn spawn_immediate_descendant(marker_path: &str) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(GRANDCHILD_SENTINEL)
+        .arg(marker_path)
+        .arg(GRANDCHILD_LIFETIME_SECS.to_string())
+        .stdin(ProcessStdio::null())
+        .stdout(ProcessStdio::null())
+        .stderr(ProcessStdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    let _ = cmd.spawn()?;
+    Ok(())
 }
 
 /// Parsed grandchild-mode arguments.

@@ -59,6 +59,17 @@ impl ConfigFile {
     }
 }
 
+/// Write raw TOML to a temp config file. Use only for Phase 5 transport shapes
+/// that the older typed builders cannot express yet (Streamable-HTTP).
+pub fn raw_config_file(toml: &str) -> ConfigFile {
+    let mut tmp = NamedTempFile::new().expect("failed to create raw config temp file");
+    tmp.write_all(toml.as_bytes())
+        .expect("failed to write raw config TOML");
+    tmp.as_file().sync_all().ok();
+    let path = tmp.path().to_path_buf();
+    ConfigFile { _file: tmp, path }
+}
+
 /// A builder for a Phase 1 TOML config.
 ///
 /// Defaults to one stdio upstream named `probe` pointing at the in-repo

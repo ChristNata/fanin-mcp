@@ -3,15 +3,22 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "test-creator",
+  "current_step": "implementer",
+  "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main at end of cycle)",
+  "decisions": {
+    "macos-hardkill": "Documented limitation — Linux PDEATHSIG + Windows suspended-spawn are crash-safe; macOS graceful process-group teardown only, SIGKILL-orphan gap documented (no daemon/supervisor/kqueue). User-accepted default.",
+    "remote-http-test": "In-repo loopback Streamable-HTTP mock for CI; real public remote is a documented release-checklist manual step. User-accepted default.",
+    "oq3-http-transport": "rmcp =1.8.0 ships StreamableHttpClientTransport; feature is the -client variant (transport-streamable-http-client[-reqwest]), NOT transport-streamable-http. See oq3-http-transport-findings.md."
+  },
   "steps": {
     "planner": {
       "status": "complete",
       "at": "2026-06-27T00:00:00Z"
     },
     "test-creator": {
-      "status": "pending",
-      "at": null
+      "status": "complete",
+      "at": "2026-06-27T09:30:00Z",
+      "note": "P1-P5 contracts authored; fmt+clippy clean, suite compiles. token_figures fails-by-assertion until bench exists (expected). test-needs-impl: expose map_service_error (CARRY-4); --log-file/--log-level CLI; streamable-http config shape; bench writes target/token-figures.generated.md + README markers. P4 crit 10/11 reuse existing namespace_acl/cred_store green coverage."
     },
     "implementer": {
       "status": "pending",
