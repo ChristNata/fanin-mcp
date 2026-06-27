@@ -1,0 +1,33 @@
+{
+  "feature": "phase-5-polish-ci-benchmarks",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "test-creator",
+  "steps": {
+    "planner": {
+      "status": "complete",
+      "at": "2026-06-27T00:00:00Z"
+    },
+    "test-creator": {
+      "status": "pending",
+      "at": null
+    },
+    "implementer": {
+      "status": "pending",
+      "at": null
+    },
+    "simplifier": {
+      "status": "pending",
+      "at": null
+    },
+    "reviewer": {
+      "status": "pending",
+      "at": null
+    },
+    "knowledge-sync": {
+      "status": "pending",
+      "at": null
+    }
+  }
+}
