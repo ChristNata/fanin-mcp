@@ -181,11 +181,13 @@ impl Aggregator {
                 if !namespace.is_tool_allowed(&server, &tool.name) {
                     continue; // discovery-time filter: denied tool never emitted
                 }
+                let disp_name = sanitize_upstream_text(&tool.name);
+                let disp_desc = sanitize_upstream_text(&tool.description.unwrap_or_default());
                 rows.push(serde_json::json!({
                     "server": server,
-                    "tool": tool.name,
-                    "name": tool.name,
-                    "description": tool.description.unwrap_or_default(),
+                    "tool": disp_name,
+                    "name": disp_name,
+                    "description": disp_desc,
                 }));
             }
         }
@@ -253,9 +255,13 @@ impl Aggregator {
             }
             .as_result();
         };
-        CallToolResult::success(vec![Content::text(
-            serde_json::Value::Object((*found.input_schema).clone()).to_string(),
-        )])
+        // Sanitize only upstream-authored metadata strings inside the schema
+        // (title/description/$comment/examples/enum display strings).
+        // Structural keys (type, properties, required, property keys, etc.)
+        // are left untouched so the returned JSON remains a valid schema shape.
+        let sanitized_schema =
+            sanitize_schema_metadata(&serde_json::Value::Object((*found.input_schema).clone()));
+        CallToolResult::success(vec![Content::text(sanitized_schema.to_string())])
     }
 
     async fn handle_invoke_tool(
@@ -360,6 +366,107 @@ fn parse_server_tool(name: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((server, tool))
+}
+
+/// Sanitize upstream-authored text (tool names, descriptions, schema metadata strings)
+/// for LLM-visible display only.
+///
+/// - Strips every C0 control character (U+0000–U+001F) and DEL (U+007F),
+///   including `\n`, `\r`, `\t`, VT, FF. Each is replaced by a single ASCII space.
+/// - The result is always a single logical line (no newlines or control chars).
+/// - After stripping, length is capped to ~100 Unicode characters (scalar values),
+///   never splitting a multibyte UTF-8 sequence.
+/// - This is DISPLAY-ONLY. It is never applied to `invoke_tool` arguments or
+///   result content (see D-004 / GOTCHA #4). Dispatch and namespace checks
+///   continue to use the real upstream tool name from the registry inventory.
+fn sanitize_upstream_text(s: &str) -> String {
+    // Replace every control with a single space (produces single-line, control-free).
+    let stripped: String = s
+        .chars()
+        .map(|c| {
+            let u = c as u32;
+            if u <= 0x1F || u == 0x7F {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    // Cap after stripping. Use char count (Unicode scalars), not bytes.
+    const CAP: usize = 100;
+    let mut capped: String = stripped.chars().take(CAP).collect();
+
+    // If we introduced leading/trailing spaces from boundary controls, trim the outer ones
+    // only for cleanliness; inner runs are left (tests do not require collapse).
+    // Trimming does not affect control-freedom or the cap (trim happens after take).
+    let trimmed = capped.trim();
+    if trimmed.len() != capped.len() {
+        // Re-apply cap after trim if needed (trim can only shorten).
+        capped = trimmed.chars().take(CAP).collect();
+    } else {
+        capped = trimmed.to_string();
+    }
+
+    capped
+}
+
+/// Recursively sanitize string values that appear under upstream-authored
+/// schema metadata keys, while preserving the JSON structure required by
+/// JSON Schema consumers (type, properties, required, property keys, etc.).
+///
+/// Targeted metadata keys (per plan): "title", "description", "$comment",
+/// "examples", "enum". For the array-valued keys we sanitize the string
+/// *elements* they contain. All other values and keys are left structurally
+/// identical; only the *contents* of those specific metadata strings change.
+fn sanitize_schema_metadata(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, val) in map {
+                let sanitized = if is_schema_metadata_key(key) {
+                    sanitize_metadata_value(val)
+                } else {
+                    sanitize_schema_metadata(val)
+                };
+                out.insert(key.clone(), sanitized);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            let out: Vec<_> = arr.iter().map(sanitize_schema_metadata).collect();
+            serde_json::Value::Array(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn is_schema_metadata_key(k: &str) -> bool {
+    matches!(
+        k,
+        "title" | "description" | "$comment" | "examples" | "enum"
+    )
+}
+
+fn sanitize_metadata_value(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) => serde_json::Value::String(sanitize_upstream_text(s)),
+        serde_json::Value::Array(arr) => {
+            // examples / enum: sanitize any string members; recurse non-strings
+            let out: Vec<_> = arr
+                .iter()
+                .map(|item| {
+                    if let serde_json::Value::String(s) = item {
+                        serde_json::Value::String(sanitize_upstream_text(s))
+                    } else {
+                        sanitize_schema_metadata(item)
+                    }
+                })
+                .collect();
+            serde_json::Value::Array(out)
+        }
+        other => sanitize_schema_metadata(other),
+    }
 }
 
 /// `list_tools` — optional `server` string filter.

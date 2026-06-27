@@ -1,11 +1,12 @@
 //! Upstream registry — maps server names to lazy `RunningService`s.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
-use rmcp::service::RunningService;
+use rmcp::service::{RunningService, ServiceError};
 use rmcp::{RoleClient, ServiceExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
@@ -19,12 +20,24 @@ use crate::forward::UpstreamClientHandler;
 pub type UpstreamService = RunningService<RoleClient, UpstreamClientHandler>;
 
 /// Cached upstream connection and inventory.
+///
+/// The `tools` cache is interior-mutable (RwLock) so a `list_changed`
+/// notification can mark it dirty and a subsequent read can lazily refetch
+/// without rebuilding the `Arc<UpstreamEntry>`.
+///
+/// `dirty` is an `Arc<AtomicBool>` (not a back-pointer) so the handler can
+/// set it without creating an Arc cycle and without ever touching the
+/// registry map. The registry entry holds the same Arc so `ensure_fresh`
+/// can observe it on the read path.
 #[derive(Debug)]
 pub struct UpstreamEntry {
     /// Live rmcp client service.
     pub service: Arc<UpstreamService>,
-    /// Cached tools/list inventory for the session.
-    pub tools: Vec<Tool>,
+    /// Cached tools/list inventory for the session (refetchable on dirty).
+    pub tools: RwLock<Vec<Tool>>,
+    /// Dirty flag for `notifications/tools/list_changed` invalidation.
+    /// Set by the handler for THIS server only; observed lazily on read.
+    pub dirty: Arc<AtomicBool>,
     /// OS process-tree containment handle retained for the service lifetime.
     pub _containment: crate::process::ContainmentGuard,
 }
@@ -105,8 +118,14 @@ impl Registry {
     }
 
     /// Return cached inventory for a server, connecting if necessary.
+    ///
+    /// Lazily refetches if the per-entry dirty flag was set by a prior
+    /// `notifications/tools/list_changed` for this server only.
     pub async fn inventory(&self, server: &str) -> Result<Vec<Tool>, ToolError> {
-        Ok(self.get_or_connect(server).await?.tools.clone())
+        let entry = self.get_or_connect(server).await?;
+        self.ensure_fresh(&entry, server).await?;
+        let tools = entry.tools.read().await.clone();
+        Ok(tools)
     }
 
     /// Forward a tool call without holding the registry map lock across await.
@@ -121,7 +140,17 @@ impl Registry {
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult, ToolError> {
         let entry = self.get_or_connect(server).await?;
-        if !entry.tools.iter().any(|t| t.name.as_ref() == tool) {
+        // Ensure a fresh inventory if a list_changed notification arrived for
+        // this server. Lock discipline: get_or_connect already dropped the map
+        // lock; we hold only the cloned Arc<Entry> here.
+        self.ensure_fresh(&entry, server).await?;
+        if !entry
+            .tools
+            .read()
+            .await
+            .iter()
+            .any(|t| t.name.as_ref() == tool)
+        {
             return Err(ToolError::UnknownTool {
                 server: server.to_string(),
                 tool: tool.to_string(),
@@ -138,11 +167,29 @@ impl Registry {
         let call_fut = entry.service.peer().call_tool(params);
         match timeout(effective, call_fut).await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(ToolError::UpstreamCall {
-                server: server.to_string(),
-                tool: tool.to_string(),
-                message: e.to_string(),
-            }),
+            Ok(Err(e)) => {
+                // Detect mid-session upstream death (closed transport) distinctly
+                // from a live upstream reporting a tool-level failure.
+                // rmcp 1.8.0: peer().call_tool returns Result<_, ServiceError>.
+                // ServiceError::TransportClosed is the variant for a closed/broken
+                // transport (dead process, closed stdio pipe). We map THAT to
+                // UpstreamDisconnected (per state.json: no silent reconnect).
+                // Genuine tool failures from a live upstream remain UpstreamCall.
+                // Lock discipline preserved: we already hold only the cloned Arc
+                // here; map lock was dropped inside get_or_connect.
+                if matches!(e, ServiceError::TransportClosed) {
+                    Err(ToolError::UpstreamDisconnected {
+                        server: server.to_string(),
+                        tool: tool.to_string(),
+                    })
+                } else {
+                    Err(ToolError::UpstreamCall {
+                        server: server.to_string(),
+                        tool: tool.to_string(),
+                        message: e.to_string(),
+                    })
+                }
+            }
             Err(_elapsed) => Err(ToolError::UpstreamTimeout {
                 server: server.to_string(),
                 tool: tool.to_string(),
@@ -160,6 +207,67 @@ impl Registry {
             .map(|c| c.timeout_secs)
             .unwrap_or(60);
         Duration::from_secs(secs)
+    }
+
+    /// Lazily refetch the tool inventory for `entry` if its dirty flag is set.
+    ///
+    /// - Reads the atomic dirty flag (no lock).
+    /// - If dirty: `swap(false)` (only one racer refetches), then calls
+    ///   `peer().list_all_tools().await` with **no** registry map lock and
+    ///   **no** `tools` RwLock held across the await (D-007 / GOTCHA #16).
+    /// - On successful refetch, briefly acquires the per-entry `tools` write
+    ///   lock only to overwrite the cached vec.
+    /// - On refetch failure (transport closed / dead upstream) returns
+    ///   `ToolError::UpstreamDisconnected` (no silent reconnect).
+    /// - The `server` name is used only for error construction.
+    ///
+    /// The caller must have already dropped the registry `entries` map lock
+    /// (guaranteed by `get_or_connect` returning a cloned `Arc<UpstreamEntry>`).
+    async fn ensure_fresh(
+        &self,
+        entry: &Arc<UpstreamEntry>,
+        server: &str,
+    ) -> Result<(), ToolError> {
+        // Fast path: not dirty.
+        if !entry.dirty.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Swap to false; only the winner of a race performs the refetch.
+        // A benign double-refetch is acceptable; we must not deadlock.
+        let was_dirty = entry.dirty.swap(false, Ordering::Relaxed);
+        if !was_dirty {
+            // Another task cleared it first; nothing to do.
+            return Ok(());
+        }
+
+        // IMPORTANT: do NOT hold any registry map lock here.
+        // We hold only the cloned Arc<Entry> (map lock already dropped).
+        // Also do NOT hold entry.tools across the await.
+        let fresh = match entry.service.peer().list_all_tools().await {
+            Ok(list) => list,
+            Err(e) => {
+                // Treat transport death distinctly (same policy as call_tool).
+                if matches!(e, ServiceError::TransportClosed) {
+                    return Err(ToolError::UpstreamDisconnected {
+                        server: server.to_string(),
+                        tool: String::new(),
+                    });
+                }
+                return Err(ToolError::UpstreamCall {
+                    server: server.to_string(),
+                    tool: String::new(),
+                    message: e.to_string(),
+                });
+            }
+        };
+
+        // Briefly hold only the per-entry tools lock to install the fresh list.
+        {
+            let mut guard = entry.tools.write().await;
+            *guard = fresh;
+        }
+        Ok(())
     }
 }
 
@@ -180,7 +288,12 @@ async fn connect(
     let transport = spawned.transport;
     let containment = spawned.containment;
     debug_assert!(containment.is_retained());
-    let handler = UpstreamClientHandler::new(server, log_file);
+
+    // Create the per-server dirty flag BEFORE the handler so we can share it.
+    // Handler gets a clone; the entry will store the same Arc.
+    // No registry map lock is involved here; this is purely local to the entry.
+    let dirty = Arc::new(AtomicBool::new(false));
+    let handler = UpstreamClientHandler::new(server, log_file, dirty.clone());
     let service = handler
         .serve(transport)
         .await
@@ -200,7 +313,8 @@ async fn connect(
 
     Ok(UpstreamEntry {
         service,
-        tools,
+        tools: RwLock::new(tools),
+        dirty,
         _containment: containment,
     })
 }

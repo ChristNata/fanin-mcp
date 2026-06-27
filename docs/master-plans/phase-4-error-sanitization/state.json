@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "THOROUGH",
-  "current_step": "implement",
+  "current_step": "simplify",
   "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main)",
   "decisions": {
     "error-type-name": "Keep ToolError; finalize coverage + add upstream_disconnected code (no rename) — OQ1 default accepted.",
@@ -13,7 +13,7 @@
   "steps": {
     "plan": { "status": "complete", "at": "2026-06-27T00:11:27Z" },
     "test-create": { "status": "complete", "at": "2026-06-27T00:30:00Z" },
-    "implement": { "status": "pending", "at": null },
+    "implement": { "status": "complete", "at": "2026-06-27T00:55:00Z" },
     "simplify": { "status": "pending", "at": null },
     "review": { "status": "pending", "at": null },
     "push": { "status": "pending", "at": null },

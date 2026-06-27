@@ -46,6 +46,10 @@ pub enum ToolError {
         tool: String,
         message: String,
     },
+    /// The upstream transport/connection closed mid-session (process died or pipe broke).
+    /// Distinct from `UpstreamCall` (live upstream reported a failure).
+    /// Produces code "upstream_disconnected" via structured_error (D-005 shape preserved).
+    UpstreamDisconnected { server: String, tool: String },
     /// Upstream call exceeded the per-server `timeout_secs`.
     /// Returned as `CallToolResult { isError: true }` with code "upstream_timeout".
     /// Never a JSON-RPC error (D-005).
@@ -102,6 +106,12 @@ impl ToolError {
                 tool,
                 message,
             } => structured_error(Some(server), Some(tool), "upstream_call_failed", message),
+            ToolError::UpstreamDisconnected { server, tool } => structured_error(
+                Some(server),
+                Some(tool),
+                "upstream_disconnected",
+                &format!("upstream `{server}` disconnected (process died or transport closed)"),
+            ),
             ToolError::UpstreamTimeout { server, tool } => structured_error(
                 Some(server),
                 Some(tool),

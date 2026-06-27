@@ -1,6 +1,9 @@
 //! Forward path — upstream client handler and byte-faithful forwarding.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
@@ -8,7 +11,7 @@ use rmcp::model::{
     CreateMessageRequestParams, CreateMessageResult, Implementation, ListRootsResult,
     LoggingMessageNotificationParam, ProgressNotificationParam,
 };
-use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext};
 use rmcp::{ErrorData as McpError, RoleClient};
 use serde_json::json;
 
@@ -19,14 +22,29 @@ use crate::process::append_log_line;
 pub struct UpstreamClientHandler {
     server: String,
     log_file: Option<PathBuf>,
+    /// Per-server dirty flag for `notifications/tools/list_changed` cache
+    /// invalidation. Shared with the corresponding `UpstreamEntry` so the
+    /// registry can observe it on the next read path (lazy refetch).
+    /// No back-reference to the entry is stored here — no Arc cycle.
+    dirty: Arc<AtomicBool>,
 }
 
 impl UpstreamClientHandler {
     /// Creates a handler for one upstream server.
-    pub fn new(server: impl Into<String>, log_file: Option<PathBuf>) -> Self {
+    ///
+    /// `dirty` is a per-server atomic flag (shared with the registry entry)
+    /// that is set to `true` on receipt of `notifications/tools/list_changed`
+    /// for this upstream only. The caller (registry) owns the Arc and clones
+    /// it into the handler; no registry map lock is touched inside the handler.
+    pub fn new(
+        server: impl Into<String>,
+        log_file: Option<PathBuf>,
+        dirty: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             server: server.into(),
             log_file,
+            dirty,
         }
     }
 }
@@ -92,6 +110,19 @@ impl ClientHandler for UpstreamClientHandler {
     ) {
         let raw = format!("progress {:?}", params);
         self.append_redacted(raw).await;
+    }
+
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        // Per design (state.json decisions.cache-shape + tests.md "Notes"):
+        // Mark ONLY this server's cache dirty. Do NOT refetch here (would risk
+        // blocking rmcp's notification path). Do NOT touch the registry map.
+        // Lazy refetch happens on the next inventory()/call_tool() read path.
+        // Per-server scope: each handler owns only its own dirty flag (SC 10).
+        self.dirty.store(true, Ordering::Relaxed);
+        std::future::ready(())
     }
 }
 
