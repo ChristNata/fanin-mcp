@@ -53,7 +53,10 @@ pub enum ToolError {
     /// Upstream call exceeded the per-server `timeout_secs`.
     /// Returned as `CallToolResult { isError: true }` with code "upstream_timeout".
     /// Never a JSON-RPC error (D-005).
-    UpstreamTimeout { server: String, tool: String },
+    UpstreamTimeout {
+        server: String,
+        tool: Option<String>,
+    },
     /// Downstream client sent `notifications/cancelled` for this request id.
     /// We abort the local in-flight future (local observable per OQ3).
     /// We do not forward `notify_cancelled` upstream (rmcp=1.8.0 does not give
@@ -112,12 +115,15 @@ impl ToolError {
                 "upstream_disconnected",
                 &format!("upstream `{server}` disconnected (process died or transport closed)"),
             ),
-            ToolError::UpstreamTimeout { server, tool } => structured_error(
-                Some(server),
-                Some(tool),
-                "upstream_timeout",
-                &format!("upstream call to `{tool}` on `{server}` exceeded timeout"),
-            ),
+            ToolError::UpstreamTimeout { server, tool } => {
+                let message = match tool {
+                    Some(tool) => {
+                        format!("upstream call to `{tool}` on `{server}` exceeded timeout")
+                    }
+                    None => format!("upstream operation on `{server}` exceeded timeout"),
+                };
+                structured_error(Some(server), tool.as_deref(), "upstream_timeout", &message)
+            }
             ToolError::CallCancelled { server, tool } => structured_error(
                 Some(server),
                 Some(tool),

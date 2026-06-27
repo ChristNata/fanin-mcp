@@ -160,13 +160,12 @@ impl Registry {
             Err(_elapsed) => {
                 tracing::warn!(
                     server,
-                    event = "upstream_failure",
-                    code = "timeout",
+                    event = "upstream_timeout",
                     "upstream connect timed out"
                 );
                 return Err(ToolError::UpstreamTimeout {
                     server: server.to_string(),
-                    tool: String::new(),
+                    tool: None,
                 });
             }
         });
@@ -257,13 +256,12 @@ impl Registry {
                 tracing::warn!(
                     server,
                     tool,
-                    event = "upstream_failure",
-                    code = "timeout",
+                    event = "upstream_timeout",
                     "upstream call timed out"
                 );
                 Err(ToolError::UpstreamTimeout {
                     server: server.to_string(),
-                    tool: tool.to_string(),
+                    tool: Some(tool.to_string()),
                 })
             }
         };
@@ -328,13 +326,12 @@ impl Registry {
                 entry.dirty.store(true, Ordering::Relaxed);
                 tracing::warn!(
                     server,
-                    event = "upstream_failure",
-                    code = "timeout",
+                    event = "upstream_timeout",
                     "upstream inventory refetch timed out"
                 );
                 return Err(ToolError::UpstreamTimeout {
                     server: server.to_string(),
-                    tool: String::new(),
+                    tool: None,
                 });
             }
         };

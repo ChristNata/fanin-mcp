@@ -113,6 +113,7 @@ pub struct ServerConfig {
     /// the same `${VAR}` credential/env path as env and headers, then applied
     /// with `Command::current_dir`. When absent, the child inherits fanin-mcp's
     /// process working directory. Streamable-HTTP accepts but ignores this field.
+    /// Empty or whitespace-only values are rejected before spawn, including after `${VAR}` resolution.
     pub cwd: Option<String>,
     /// Per-server env vars (`[servers.<name>.env]`). Optional.
     /// Values may contain `${VAR}` placeholders; these are resolved at spawn
