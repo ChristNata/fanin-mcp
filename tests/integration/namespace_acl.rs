@@ -27,8 +27,10 @@ use crate::common::fixtures as fx;
 const ACL_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The exact set of probe tool names (mirrors discovery.rs). Phase 3 extends
-/// the probe with `echo_env` and `spawn_grandchild`, bringing the total to 10.
-const PROBE_TOOL_NAMES: [&str; 10] = [
+/// the probe with `echo_env` and `spawn_grandchild`, bringing the total to
+/// 10. Phase 4 adds `poison_meta`, `poison_schema`, `mutate_tools`, and
+/// `self_pid`, bringing the static total to 14.
+const PROBE_TOOL_NAMES: [&str; 14] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -39,6 +41,10 @@ const PROBE_TOOL_NAMES: [&str; 10] = [
     "needs_roots",
     "echo_env",
     "spawn_grandchild",
+    "poison_meta",
+    "poison_schema",
+    "mutate_tools",
+    "self_pid",
 ];
 
 /// Extract the text content of a list_tools result as a JSON array of rows.

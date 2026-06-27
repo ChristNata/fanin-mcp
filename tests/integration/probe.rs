@@ -19,7 +19,12 @@ use crate::common;
 /// The exact, ordered set of probe tool names (master criterion 7). Phase 3
 /// extends the probe with `echo_env` (env isolation proof) and
 /// `spawn_grandchild` (hard-kill orphan proof), bringing the total to 10.
-const PROBE_TOOL_NAMES: [&str; 10] = [
+/// Phase 4 adds `poison_meta`, `poison_schema`, `mutate_tools`, and
+/// `self_pid` (sanitization + list_changed + mid-session-death proofs),
+/// bringing the static total to 14. The runtime-added `added_tool` (toggled
+/// by `mutate_tools`) is NOT in this static set; it appears only after
+/// `mutate_tools` adds it.
+const PROBE_TOOL_NAMES: [&str; 14] = [
     "echo_ok",
     "always_error",
     "slow_tool",
@@ -30,6 +35,10 @@ const PROBE_TOOL_NAMES: [&str; 10] = [
     "needs_roots",
     "echo_env",
     "spawn_grandchild",
+    "poison_meta",
+    "poison_schema",
+    "mutate_tools",
+    "self_pid",
 ];
 
 fn find_probe_tool<'a>(tools: &'a [Value], name: &str) -> Option<&'a Value> {
@@ -85,8 +94,8 @@ async fn probe_exposes_exactly_eight_named_tools() {
 
     assert_eq!(
         tools.len(),
-        10,
-        "probe must expose exactly 10 tools, got {}: {tools:?}",
+        14,
+        "probe must expose exactly 14 tools, got {}: {tools:?}",
         tools.len()
     );
     for name in PROBE_TOOL_NAMES {
