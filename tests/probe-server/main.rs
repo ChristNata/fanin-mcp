@@ -16,7 +16,7 @@
 
 use std::future::Future;
 use std::process::Stdio as ProcessStdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,6 +129,15 @@ const TOGGLE_LONG_TOOL: &str = "toggle_long_tool";
 /// WHILE the `title` / `description` annotation IS sanitized (control-free).
 /// This pins the annotation-only sanitization policy from review.md F3.
 const POISON_VALIDATION: &str = "poison_validation";
+/// `report_cwd` — remediation D-1. Returns the probe process working
+/// directory so tests can assert `cwd` was applied to the child process.
+const REPORT_CWD: &str = "report_cwd";
+
+const HANG_DURING_INITIALIZE_ARG: &str = "--hang-during-initialize";
+const HANG_DURING_LIST_TOOLS_ARG: &str = "--hang-during-list-tools";
+const HANG_DURING_REFETCH_ARG: &str = "--hang-during-refetch";
+const HANG_THEN_SPAWN_DESCENDANT_ARG: &str = "--hang-then-spawn-descendant";
+const ENABLE_REPORT_CWD_ARG: &str = "--enable-report-cwd";
 
 /// Global toggle for whether the runtime-added tool is currently visible.
 /// Set by `mutate_tools`; read by `probe_tools()` so the dynamic tool appears
@@ -143,6 +152,11 @@ static MUTATE_ADDED: AtomicBool = AtomicBool::new(false);
 /// current (pre-F2-fix) tree; the F2 test toggles it ON.
 static LONG_ADDED: AtomicBool = AtomicBool::new(false);
 
+/// Counts tools/list calls for the remediation S-1 refetch hang fixture. The
+/// first discovery succeeds; after a list_changed notification the next
+/// refetch hangs until the proxy timeout cancels it.
+static LIST_TOOLS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// Name of the tool `mutate_tools` adds/removes at runtime. Clean name so
 /// dispatch still works once it is visible.
 const MUTATE_ADDED_TOOL: &str = "added_tool";
@@ -153,6 +167,34 @@ const MUTATE_ADDED_TOOL: &str = "added_tool";
 /// (Phase 4 list_changed proof).
 #[derive(Debug, Clone, Default)]
 pub struct Probe;
+
+impl Probe {
+    fn mode() -> ProbeMode {
+        ProbeMode::from_env()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeMode {
+    Normal,
+    HangDuringListTools,
+    HangDuringRefetch,
+}
+
+impl ProbeMode {
+    fn from_env() -> Self {
+        match std::env::var("FANIN_PROBE_MODE").as_deref() {
+            Ok("hang-during-list-tools") => Self::HangDuringListTools,
+            Ok("hang-during-refetch") => Self::HangDuringRefetch,
+            _ => Self::Normal,
+        }
+    }
+}
+
+async fn pending_forever() -> ! {
+    std::future::pending::<()>().await;
+    unreachable!("pending future returned")
+}
 
 impl ServerHandler for Probe {
     /// Advertise server info and the `tools` capability (GOTCHA #8).
@@ -173,12 +215,22 @@ impl ServerHandler for Probe {
     /// fixture) appears only when `LONG_ADDED` is set by `toggle_long_tool`.
     ///
     /// Fully static except the two dynamic tools — no upstream fan-out.
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(probe_tools())))
+    ) -> Result<ListToolsResult, McpError> {
+        match Self::mode() {
+            ProbeMode::HangDuringListTools => pending_forever().await,
+            ProbeMode::HangDuringRefetch => {
+                let calls = LIST_TOOLS_CALLS.fetch_add(1, Ordering::SeqCst);
+                if calls >= 1 {
+                    pending_forever().await;
+                }
+                Ok(ListToolsResult::with_all_items(probe_tools()))
+            }
+            ProbeMode::Normal => Ok(ListToolsResult::with_all_items(probe_tools())),
+        }
     }
 
     /// Dispatch a tool call to its behavior.
@@ -226,6 +278,9 @@ fn probe_tools() -> Vec<Tool> {
         toggle_long_tool_tool(),
         poison_validation_tool(),
     ];
+    if std::env::var("FANIN_PROBE_REPORT_CWD").as_deref() == Ok("1") {
+        tools.push(report_cwd_tool());
+    }
     if MUTATE_ADDED.load(Ordering::SeqCst) {
         tools.push(added_tool());
     }
@@ -641,6 +696,16 @@ fn poison_validation_tool() -> Tool {
     )
 }
 
+/// `report_cwd` tool definition (remediation D-1). No arguments; returns the
+/// actual current working directory of the probe child.
+fn report_cwd_tool() -> Tool {
+    Tool::new(
+        REPORT_CWD,
+        "Reports this probe process's current working directory.",
+        empty_object_schema(),
+    )
+}
+
 /// `toggle_long_tool` tool definition (review fix F2). Toggles the F2
 /// `long_named_tool` (120-char name) in the probe's runtime tool list. Clean
 /// name + description. Does NOT emit `notifications/tools/list_changed` — the
@@ -712,10 +777,20 @@ async fn dispatch(
         TOGGLE_LONG_TOOL => toggle_long_tool(context),
         LONG_TOOL_NAME => echo_ok(arguments),
         POISON_VALIDATION => echo_ok(arguments),
+        REPORT_CWD => report_cwd(),
         MUTATE_ADDED_TOOL => CallToolResult::success(vec![Content::text(
             "added_tool: runtime-added tool called successfully".to_string(),
         )]),
         _ => unknown_tool_result(name),
+    }
+}
+
+fn report_cwd() -> CallToolResult {
+    match std::env::current_dir() {
+        Ok(path) => CallToolResult::success(vec![Content::text(path.to_string_lossy())]),
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "report_cwd: failed to read current_dir: {e}"
+        ))]),
     }
 }
 
@@ -1008,6 +1083,30 @@ async fn main() -> std::process::ExitCode {
         }
     }
 
+    if has_arg(HANG_DURING_INITIALIZE_ARG) {
+        pending_forever().await;
+    }
+
+    if let Some(marker_path) = parse_value_arg(HANG_THEN_SPAWN_DESCENDANT_ARG) {
+        if let Err(e) = spawn_immediate_descendant(&marker_path) {
+            eprintln!("probe-server: failed to spawn timeout descendant: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+        pending_forever().await;
+    }
+
+    if has_arg(HANG_DURING_LIST_TOOLS_ARG) {
+        std::env::set_var("FANIN_PROBE_MODE", "hang-during-list-tools");
+    }
+
+    if has_arg(HANG_DURING_REFETCH_ARG) {
+        std::env::set_var("FANIN_PROBE_MODE", "hang-during-refetch");
+    }
+
+    if has_arg(ENABLE_REPORT_CWD_ARG) {
+        std::env::set_var("FANIN_PROBE_REPORT_CWD", "1");
+    }
+
     init_tracing();
 
     let probe = Probe;
@@ -1030,13 +1129,21 @@ async fn main() -> std::process::ExitCode {
 const IMMEDIATE_DESCENDANT_ARG: &str = "--spawn-immediate-descendant";
 
 fn parse_immediate_descendant_arg() -> Option<String> {
+    parse_value_arg(IMMEDIATE_DESCENDANT_ARG)
+}
+
+fn parse_value_arg(name: &str) -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == IMMEDIATE_DESCENDANT_ARG {
+        if arg == name {
             return args.next();
         }
     }
     None
+}
+
+fn has_arg(name: &str) -> bool {
+    std::env::args().skip(1).any(|arg| arg == name)
 }
 
 fn spawn_immediate_descendant(marker_path: &str) -> std::io::Result<()> {

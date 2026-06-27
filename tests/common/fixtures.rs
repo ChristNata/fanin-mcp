@@ -81,6 +81,7 @@ pub struct ConfigBuilder {
     namespace_name: String,
     namespace_servers: Vec<String>,
     log_file: Option<String>,
+    cwd: Option<String>,
     /// Extra raw TOML lines appended verbatim (for negative-schema tests:
     /// e.g. adding a second server the plan does not forbid but Phase 1 does
     /// not need). Use sparingly — prefer typed fields.
@@ -97,6 +98,7 @@ impl Default for ConfigBuilder {
             namespace_name: "default".to_string(),
             namespace_servers: vec!["probe".to_string()],
             log_file: None,
+            cwd: None,
             extra: Vec::new(),
         }
     }
@@ -157,6 +159,12 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the per-server working directory.
+    pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
     /// Append raw TOML lines verbatim. For negative tests only.
     pub fn extra_raw(mut self, line: impl Into<String>) -> Self {
         self.extra.push(line.into());
@@ -194,6 +202,9 @@ impl ConfigBuilder {
         }
         if let Some(log) = &self.log_file {
             s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
+        }
+        if let Some(cwd) = &self.cwd {
+            s.push_str(&format!("cwd = '{}'\n", escape_literal(cwd)));
         }
         s.push('\n');
 
@@ -253,6 +264,8 @@ pub struct ServerEntry {
     pub name: String,
     /// Optional per-server log sink. When `None`, no `log_file` is written.
     pub log_file: Option<String>,
+    /// Optional per-server working directory.
+    pub cwd: Option<String>,
 }
 
 impl ServerEntry {
@@ -261,12 +274,20 @@ impl ServerEntry {
         Self {
             name: name.into(),
             log_file: None,
+            cwd: None,
         }
     }
 
     /// Attach a per-server log sink.
     pub fn with_log_file(mut self, log_file: impl Into<String>) -> Self {
         self.log_file = Some(log_file.into());
+        self
+    }
+
+    /// Attach a per-server working directory.
+    #[allow(dead_code)] // fixture API used by remediation builders as needed.
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 }
@@ -372,6 +393,9 @@ impl MultiConfigBuilder {
             s.push_str("args = []\n");
             if let Some(log) = &entry.log_file {
                 s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
+            }
+            if let Some(cwd) = &entry.cwd {
+                s.push_str(&format!("cwd = '{}'\n", escape_literal(cwd)));
             }
             s.push('\n');
         }
@@ -482,6 +506,8 @@ pub struct Phase3ServerEntry {
     pub env: Vec<(String, String)>,
     /// Optional per-server log sink.
     pub log_file: Option<String>,
+    /// Optional per-server working directory.
+    pub cwd: Option<String>,
 }
 
 impl Phase3ServerEntry {
@@ -492,6 +518,7 @@ impl Phase3ServerEntry {
             timeout_secs: None,
             env: Vec::new(),
             log_file: None,
+            cwd: None,
         }
     }
 
@@ -504,6 +531,13 @@ impl Phase3ServerEntry {
     /// Attach a per-server log sink.
     pub fn with_log_file(mut self, log_file: impl Into<String>) -> Self {
         self.log_file = Some(log_file.into());
+        self
+    }
+
+    /// Set the per-server working directory.
+    #[allow(dead_code)] // fixture API used by future cwd cases as needed.
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 
@@ -570,6 +604,9 @@ impl Phase3ConfigBuilder {
             }
             if let Some(log) = &entry.log_file {
                 s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
+            }
+            if let Some(cwd) = &entry.cwd {
+                s.push_str(&format!("cwd = '{}'\n", escape_literal(cwd)));
             }
             s.push('\n');
         }

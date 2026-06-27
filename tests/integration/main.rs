@@ -34,6 +34,7 @@ mod probe;
 mod process_lifetime;
 mod registry;
 mod regression_guard;
+mod remediation_s1_d1;
 mod reverse_traffic;
 mod sanitization;
 mod timeout_cancellation;

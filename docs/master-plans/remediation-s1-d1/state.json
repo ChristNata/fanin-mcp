@@ -3,12 +3,12 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "test-creator",
+  "current_step": "implementer",
   "cycle_model": "linear-on-main (no worktree/PR/merge; checkpoint commits to main, one end-of-cycle push only after user confirms)",
   "origin": "Spun from docs/master-plans/full-codebase-review/review-SYNTHESIS.md — remediates S-1 (unbounded upstream connect/discovery/refetch outside timeout_secs, D-012 violation) and D-1 (documented per-server cwd field unimplemented).",
   "steps": {
     "planner": { "status": "complete", "at": "2026-06-27T23:00:00Z" },
-    "test-creator": { "status": "pending", "at": null },
+    "test-creator": { "status": "complete", "at": "2026-06-27T23:25:00Z", "note": "14 tests across remediation_s1_d1.rs + probe hang-modes + report_cwd + cwd fixtures. Gate verified by orchestrator: fmt+clippy clean; 117 passed / 12 failed / 4 ignored; the 12 reds are exactly the new S-1(7)+D-1(5) contract tests; 2 new (unset-cwd, http-ignores-cwd) green by inheritance; 115 existing green; 6.9s no-hang." },
     "implementer": { "status": "pending", "at": null },
     "reviewer": { "status": "pending", "at": null },
     "simplifier": { "status": "pending", "at": null }
