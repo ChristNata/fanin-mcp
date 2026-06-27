@@ -253,13 +253,11 @@ impl JsonRpcChild {
 /// hyphens preserved (e.g. bin `probe-server` -> `CARGO_BIN_EXE_probe-server`).
 /// Do not uppercase or transform; that breaks resolution on every platform.
 pub async fn spawn_bin(bin: &str) -> JsonRpcChild {
-    let env_key = format!("CARGO_BIN_EXE_{bin}");
-    let path = std::env::var(&env_key).unwrap_or_else(|_| {
-        panic!(
-            "cargo did not inject {env_key}; the test harness relies on the \
-             [[bin]] target named `{bin}` being built before tests run"
-        )
-    });
+    let path = match bin {
+        "fanin-mcp" => env!("CARGO_BIN_EXE_fanin-mcp").to_string(),
+        "probe-server" => env!("CARGO_BIN_EXE_probe-server").to_string(),
+        other => panic!("unknown bin {other}"),
+    };
     spawn_path(path).await
 }
 
@@ -316,12 +314,7 @@ pub async fn spawn_fanin_with_config(config_path: &str, namespace: Option<&str>)
 /// process to exit BEFORE serving — those tests do not need a JSON-RPC
 /// connection, just the exit status and a clean-stdout observation.
 pub async fn spawn_fanin_with_args(args: &[String]) -> JsonRpcChild {
-    let path = std::env::var("CARGO_BIN_EXE_fanin-mcp").unwrap_or_else(|_| {
-        panic!(
-            "cargo did not inject CARGO_BIN_EXE_fanin-mcp; the [[bin]] target \
-             `fanin-mcp` must be built before the test binary runs"
-        )
-    });
+    let path = env!("CARGO_BIN_EXE_fanin-mcp").to_string();
     let mut cmd = Command::new(&path);
     cmd.args(args);
     cmd.stdin(Stdio::piped())
@@ -470,12 +463,7 @@ pub async fn run_fanin_cli(
     stdin_payload: Option<&str>,
     deadline: Duration,
 ) -> CliOutput {
-    let path = std::env::var("CARGO_BIN_EXE_fanin-mcp").unwrap_or_else(|_| {
-        panic!(
-            "cargo did not inject CARGO_BIN_EXE_fanin-mcp; the [[bin]] target \
-             `fanin-mcp` must be built before the test binary runs"
-        )
-    });
+    let path = env!("CARGO_BIN_EXE_fanin-mcp").to_string();
     let mut cmd = Command::new(&path);
     cmd.args(args);
     cmd.stdin(Stdio::piped())

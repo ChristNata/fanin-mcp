@@ -335,8 +335,6 @@ impl ImmediateDescendantGuard {
 
 #[cfg(target_os = "linux")]
 fn install_linux_parent_death_signal(cmd: &mut Command) -> Result<(), std::io::Error> {
-    use std::os::unix::process::CommandExt;
-
     // SAFETY: `pre_exec` runs in the child after fork and before exec. The
     // closure only calls the async-signal-safe `prctl` syscall and constructs
     // an io::Error from errno if it fails; it does not touch shared locks.

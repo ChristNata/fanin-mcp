@@ -33,13 +33,7 @@ static LOG_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// See the Phase 0 `spawn_bin` comment: uppercasing breaks resolution on
 /// every platform.
 pub fn probe_bin_path() -> String {
-    std::env::var("CARGO_BIN_EXE_probe-server").unwrap_or_else(|_| {
-        panic!(
-            "cargo did not inject CARGO_BIN_EXE_probe-server; the Phase 1 \
-             config fixtures rely on the `probe-server` [[bin]] target being \
-             built before the test binary runs"
-        )
-    })
+    env!("CARGO_BIN_EXE_probe-server").to_string()
 }
 
 /// A written config file plus its on-disk path. Keep the [`NamedTempFile`]
