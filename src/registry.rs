@@ -351,8 +351,11 @@ async fn connect(
         "upstream connect starting"
     );
 
-    let containment = crate::process::ContainmentGuard::Inert;
-    let _ = containment.is_retained(); // retained for platform guard; value asserted below after spawn
+    // Default for transports with no OS process to contain (HTTP). The stdio
+    // arm REPLACES this with the real guard returned by spawn_stdio_transport.
+    // It MUST be retained into the UpstreamEntry below — dropping it early would
+    // fire the Unix process-group kill on the live upstream (Transport closed).
+    let mut containment = crate::process::ContainmentGuard::Inert;
 
     // Create the per-server dirty flag BEFORE the handler so we can share it.
     // Handler gets a clone; the entry will store the same Arc.
@@ -369,9 +372,10 @@ async fn connect(
                         message: e.to_string(),
                     }
                 })?;
-            let transport = spawned.transport;
-            debug_assert!(spawned.containment.is_retained());
-            handler.serve(transport).await
+            // Retain the real OS containment guard for the upstream's lifetime;
+            // it drops (and kills the process group) only when UpstreamEntry drops.
+            containment = spawned.containment;
+            handler.serve(spawned.transport).await
         }
         "streamable-http" => {
             let endpoint = config.endpoint.as_deref().unwrap_or_default();

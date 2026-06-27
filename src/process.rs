@@ -389,13 +389,6 @@ pub enum ContainmentGuard {
     Unix { pgid: i32 },
 }
 
-impl ContainmentGuard {
-    /// Returns true while the platform containment guard is retained.
-    pub fn is_retained(&self) -> bool {
-        true
-    }
-}
-
 #[cfg(unix)]
 impl Drop for ContainmentGuard {
     fn drop(&mut self) {

@@ -49,10 +49,10 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Install cargo audit and deny
+      - name: Install cargo deny
         uses: taiki-e/install-action@v2.54.0
         with:
-          tool: cargo-audit,cargo-deny
+          tool: cargo-deny
 
       - name: Format
         run: cargo fmt --all --check
@@ -111,21 +111,10 @@ jobs:
             throw "stripped binary is $size bytes; limit is < $env:STRIPPED_SIZE_LIMIT_BYTES bytes"
           }
 
-      - name: Audit advisories
-        shell: bash
-        run: |
-          # Work around a malformed upstream RustSec advisory
-          # (anchor-lang/RUSTSEC-2026-0146.md — an unrelated crate NOT in our
-          # dependency tree) that crashes cargo-audit's DB parser before it can
-          # check our Cargo.lock. Clone the advisory DB, drop the one bad file,
-          # then audit offline. REMOVE this workaround once RustSec fixes the
-          # upstream entry (then: `run: cargo audit`).
-          rm -rf advisory-db
-          git clone --depth 1 https://github.com/rustsec/advisory-db advisory-db
-          rm -f advisory-db/crates/anchor-lang/RUSTSEC-2026-0146.md
-          cargo audit --no-fetch --db advisory-db
-
-      - name: Check deny policy (bans/licenses/sources)
-        # Advisories are covered by `cargo audit` above; skip deny's advisories
-        # check so it does not re-parse the same malformed upstream DB entry.
-        run: cargo deny check bans licenses sources
+      # Supply-chain gate: cargo-deny covers advisories + bans + licenses +
+      # sources in one tool. cargo-audit was dropped — its bundled CVSS parser
+      # does not yet support the CVSS 4.0 entries now in the RustSec advisory DB
+      # (it hard-errors on load: "unsupported CVSS version: 4.0"). cargo-deny
+      # 0.19+ parses CVSS 4.0 fine, so it is the single supply-chain check.
+      - name: Check deny policy (advisories/bans/licenses/sources)
+        run: cargo deny check
