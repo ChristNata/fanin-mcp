@@ -209,7 +209,10 @@ async fn wait_for_process_death(pid: u32, deadline: Duration) -> bool {
 // (no PID-namespace/daemon). The direct-child hard-kill test remains on
 // Linux; the graceful stdin-EOF path (KillOnDrop) covers the grandchild
 // on all OSes.
-#[cfg(windows)]
+#[cfg_attr(
+    not(windows),
+    ignore = "whole-tree hard-kill is a Windows-only guarantee; on Unix PR_SET_PDEATHSIG covers only the direct child, so a grandchild orphans on SIGKILL — documented MVP limitation"
+)]
 #[tokio::test]
 async fn hard_kill_orphan_test_no_surviving_descendants() {
     let server = format!("srv-{}", fx::phase3_unique_seq());

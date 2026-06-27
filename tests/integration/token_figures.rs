@@ -24,9 +24,12 @@ fn readme_token_figure_markers_match_benchmark_generated_output_exactly() {
     );
     let generated =
         std::fs::read_to_string(generated_path).expect("generated token figures must be readable");
+    fn normalize(s: &str) -> String {
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    }
     assert_eq!(
-        marked.trim(),
-        generated.trim(),
+        normalize(marked).trim(),
+        normalize(&generated).trim(),
         "README token figures must match benchmark-generated output exactly; run the token figure updater, never hand-edit the block"
     );
 }
