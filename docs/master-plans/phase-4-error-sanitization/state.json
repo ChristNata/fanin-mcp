@@ -1,0 +1,22 @@
+{
+  "feature": "phase-4-error-sanitization",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "THOROUGH",
+  "current_step": "test-create",
+  "cycle_model": "linear-on-main (no worktree/PR/merge; pushed directly to origin/main)",
+  "decisions": {
+    "error-type-name": "Keep ToolError; finalize coverage + add upstream_disconnected code (no rename) — OQ1 default accepted.",
+    "cache-shape": "Per-entry mutable inventory + dirty flag, lazy refetch, no map-lock across refetch — OQ2 default accepted.",
+    "reconnect-policy": "No silent reconnect; surface upstream_disconnected on mid-session death — OQ3 default accepted."
+  },
+  "steps": {
+    "plan": { "status": "complete", "at": "2026-06-27T00:11:27Z" },
+    "test-create": { "status": "pending", "at": null },
+    "implement": { "status": "pending", "at": null },
+    "simplify": { "status": "pending", "at": null },
+    "review": { "status": "pending", "at": null },
+    "push": { "status": "pending", "at": null },
+    "knowledge-sync": { "status": "pending", "at": null }
+  }
+}
