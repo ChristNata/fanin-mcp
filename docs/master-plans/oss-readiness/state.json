@@ -1,0 +1,23 @@
+{
+  "feature": "oss-readiness",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "test-creator",
+  "decisions": {
+    "O-2-security-contact": "GitHub Security Advisories private vulnerability reporting (no email exposed). User-confirmed.",
+    "O-1-publish": "Add all [package] metadata AND flip publish=true now (LICENSE + dual-license present). Version stays 0.1.0 for the release process. User-confirmed.",
+    "D-2-passthrough-stderr": "STRIKE from docs (ARCHITECTURE.md, STACK.md, GOTCHA #29). Not implemented; child stderr already captured to log file so nothing lost. User-confirmed — no code/test for D-2, doc-only.",
+    "H-7-test-hooks": "Gate the prod-binary spawn hooks behind #[cfg(debug_assertions)] (cargo test builds debug, so containment tests still see them); orchestrator verifies every existing containment test stays green. Drive without user input.",
+    "H-4-credentials-rs": "The CredentialStore-trait #[allow(dead_code)] removal at credentials.rs:36 is under managed OC edit-deny — ORCHESTRATOR edits that one line directly; the error.rs:66 removal goes to the implementer."
+  },
+  "cycle_model": "linear-on-main (checkpoint commits to main, end-of-cycle push after user confirms; knowledge-sync after push)",
+  "origin": "Closes the remaining full-codebase-review findings after remediation-s1-d1: O-1/O-2/O-3 (OSS-release blockers), D-2 (passthrough-stderr drift), H-1..H-8 (hardening + hygiene). Source: docs/master-plans/full-codebase-review/review-SYNTHESIS.md.",
+  "steps": {
+    "planner": { "status": "complete", "at": "2026-06-28T00:25:00Z", "note": "grok-4.3 (gpt-5.5 first attempt idle-timed-out mid-read at step 12 — transient, dispatch-level; fell back to grok-4.3 per model-list). 4 phases A(docs/metadata) B(hardening H-1/2/3) C(hygiene H-4/5/6 + D-2) D(test-hooks H-7). All 4 open questions now resolved in decisions{} above." },
+    "test-creator": { "status": "pending", "at": null },
+    "implementer": { "status": "pending", "at": null },
+    "reviewer": { "status": "pending", "at": null },
+    "simplifier": { "status": "pending", "at": null }
+  }
+}
