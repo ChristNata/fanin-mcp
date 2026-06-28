@@ -1,9 +1,16 @@
 //! Phase 6 OSS-readiness — literal-secret header redaction (H-3).
-//
-//! The test mirrors the structure of the existing
-//! `http_upstream_invokes_with_resolved_authorization_header_and_redacts_logs`
-//! but supplies a *literal* secret (no `${VAR}`) so that the regression
-//! fixed by unconditional registration is exercised.
+//!
+//! This test BITES the H-3 contract: a *literal* (non-`${VAR}`) secret header
+//! value must be registered for redaction unconditionally. To observe redaction
+//! end-to-end, the loopback HTTP probe responds to the `tools/call` with a
+//! Streamable-HTTP **SSE** stream that carries a `notifications/message` whose
+//! `data` echoes the `Authorization` value the upstream received, followed by
+//! the tool result. fanin-mcp's `forward.rs::on_logging_message` redacts that
+//! notification through `process::redact` before writing it to the per-server
+//! log file. With H-3 the echoed `Bearer <secret>` is registered, so the log
+//! line shows `[REDACTED]`; WITHOUT H-3 (literal value not registered) the raw
+//! value would appear — so this test fails if `registry.rs`'s
+//! `register_secret(&resolved)` for headers were removed or re-guarded.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,6 +38,9 @@ impl HeaderSeen {
     }
 }
 
+/// Loopback Streamable-HTTP probe. Plain-JSON responses for `initialize` /
+/// `tools/list`; an SSE stream for `tools/call` that first sends a logging
+/// notification echoing the observed `Authorization` value, then the result.
 async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -51,10 +61,12 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
                     return;
                 };
                 let req = String::from_utf8_lossy(&buf[..n]);
+                let mut observed_auth = String::new();
                 for line in req.lines() {
                     if let Some((name, value)) = line.split_once(':') {
                         if name.eq_ignore_ascii_case("authorization") {
-                            seen.push(value.trim().to_string());
+                            observed_auth = value.trim().to_string();
+                            seen.push(observed_auth.clone());
                         }
                     }
                 }
@@ -83,13 +95,43 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
                     let _ = socket.write_all(response.as_bytes()).await;
                     return;
                 };
+
+                // `tools/call` → SSE: a logging notification that echoes the
+                // observed Authorization value (so the registered literal header
+                // value flows through forward.rs's redacted log path), then the
+                // tool result.
+                if method == Some("tools/call") {
+                    let notif = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/message",
+                        "params": {
+                            "level": "info",
+                            "logger": "http-probe",
+                            "data": format!("upstream received authorization header: {observed_auth}")
+                        }
+                    })
+                    .to_string();
+                    let result = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"content":[{"type":"text","text":"http echo ok"}],"isError":false}
+                    })
+                    .to_string();
+                    let sse = format!("data: {notif}\n\ndata: {result}\n\n");
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{sse}"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return;
+                }
+
                 let body = match method {
                     Some("initialize") => serde_json::json!({
                         "jsonrpc":"2.0",
                         "id": id,
                         "result": {
                             "protocolVersion":"2024-11-05",
-                            "capabilities":{"tools":{}},
+                            "capabilities":{"tools":{},"logging":{}},
                             "serverInfo":{"name":"http-probe","version":"0.0.0"}
                         }
                     }),
@@ -97,11 +139,6 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
                         "jsonrpc":"2.0",
                         "id": id,
                         "result": {"tools":[{"name":"echo_ok","description":"HTTP echo","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}
-                    }),
-                    Some("tools/call") => serde_json::json!({
-                        "jsonrpc":"2.0",
-                        "id": id,
-                        "result": {"content":[{"type":"text","text":"http echo ok"}],"isError":false}
                     }),
                     _ => {
                         serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"method not found"}})
@@ -121,21 +158,16 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
 }
 
 #[tokio::test]
-/// Defense-in-depth regression guard for literal header redaction (H-3).
-///
-/// No production code path currently emits a resolved Authorization header value
-/// into a log line or stderr. Therefore a positive `[REDACTED]` assertion is
-/// impossible without editing `src/`. The negative assertion verifies that the
-/// sentinel never leaks. The registration wiring itself (`registry.rs:126`) is
-/// verified by inspection. This test is intentionally renamed to avoid implying
-/// it is a behavioral redaction proof.
-async fn literal_secret_header_value_never_leaks_in_logs() {
+/// Behavioral redaction proof for a LITERAL header secret (H-3): the value is
+/// registered unconditionally and is `[REDACTED]` when it reaches a log line.
+async fn literal_secret_header_value_is_redacted_in_logs() {
     let secret = fx::phase3_sentinel_value();
     let expected = format!("Bearer {secret}");
     let log = fx::empty_log_file_path();
 
-    // Reachable loopback HTTP probe so the literal header is actually transmitted.
-    let (endpoint, _seen) = start_http_probe(expected.clone()).await;
+    // Reachable loopback HTTP probe so the literal header is actually transmitted
+    // and echoed back through the upstream logging-notification path.
+    let (endpoint, seen) = start_http_probe(expected.clone()).await;
 
     let server = format!("http-literal-{}", fx::phase3_unique_seq());
     let cfg = http_literal_config(&server, &endpoint, &expected, &log);
@@ -143,7 +175,6 @@ async fn literal_secret_header_value_never_leaks_in_logs() {
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
-    // Trigger lazy spawn + a tool call so the header is processed.
     let resp = timeout(
         HTTP_DEADLINE,
         common::call_tool(
@@ -159,15 +190,22 @@ async fn literal_secret_header_value_never_leaks_in_logs() {
     .expect("literal-header invoke must complete");
 
     common::assert_no_rpc_error(&resp, "literal-header invoke");
+    assert!(
+        seen.contains(&expected),
+        "probe must observe the literal Authorization header value"
+    );
     child.into_guard().shutdown().await.ok();
 
-    // The literal secret must never appear raw in any log output.
-    // This is a leak-regression guard only; positive redaction cannot be
-    // observed without a src/ log emission path.
     let logs = std::fs::read_to_string(&log).unwrap_or_default();
+    // The literal secret, echoed via the upstream logging notification, must be
+    // redacted — proving H-3 registered the literal header value.
+    assert!(
+        logs.contains("[REDACTED]"),
+        "redaction marker must appear for the literal header value echoed via the upstream logging notification; log:\n{logs}"
+    );
     assert!(
         !logs.contains(&secret),
-        "literal secret header value must never leak; log contained sentinel:\n{logs}"
+        "literal secret header value must be redacted, not leaked; log:\n{logs}"
     );
 }
 
