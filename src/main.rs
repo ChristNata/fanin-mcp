@@ -66,6 +66,7 @@ struct Cli {
     log_level: String,
 
     /// Spawn a contained long-lived descendant at startup and write its PID.
+    #[cfg(debug_assertions)]
     #[arg(long, global = true, hide = true)]
     spawn_immediate_descendant: Option<PathBuf>,
 
@@ -183,9 +184,7 @@ fn parse_immediate_descendant_sentinel() -> Option<PathBuf> {
 #[cfg(debug_assertions)]
 async fn run_immediate_descendant(marker_path: PathBuf) -> ExitCode {
     if let Err(e) = std::fs::write(&marker_path, std::process::id().to_string()) {
-        // Diagnostics before `Cli::parse()` / before tracing-init use eprintln!;
-        // everything after init uses tracing; `cred list` is intentionally raw stderr
-        // for the test harness.
+        // pre-tracing-init diagnostic — see rationale above.
         eprintln!(
             "immediate descendant failed to write marker {}: {e}",
             marker_path.display()
@@ -255,9 +254,9 @@ async fn run_serve(config: CliConfig) -> ExitCode {
             "active namespace selected debug"
         );
         let registry = Arc::new(Registry::new(loaded, config.credential_store));
-        Aggregator::with_registry(config, registry, namespace)
+        Aggregator::with_registry(registry, namespace)
     } else {
-        Aggregator::new(config)
+        Aggregator::new()
     };
 
     // `stdio()` returns `(tokio::io::Stdin, tokio::io::Stdout)`. Once the serve

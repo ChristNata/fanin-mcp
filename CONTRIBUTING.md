@@ -5,6 +5,7 @@
 cargo build --release
 ```
 Produces a single static binary (`target/release/fanin-mcp`) with zero runtime dependencies.
+Config path: see README Quick Start (per-OS defaults).
 
 ## Gate — every PR must pass
 ```bash

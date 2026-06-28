@@ -121,7 +121,15 @@ async fn start_http_probe(expected_auth: String) -> (String, HeaderSeen) {
 }
 
 #[tokio::test]
-async fn literal_secret_header_value_is_registered_for_redaction() {
+/// Defense-in-depth regression guard for literal header redaction (H-3).
+///
+/// No production code path currently emits a resolved Authorization header value
+/// into a log line or stderr. Therefore a positive `[REDACTED]` assertion is
+/// impossible without editing `src/`. The negative assertion verifies that the
+/// sentinel never leaks. The registration wiring itself (`registry.rs:126`) is
+/// verified by inspection. This test is intentionally renamed to avoid implying
+/// it is a behavioral redaction proof.
+async fn literal_secret_header_value_never_leaks_in_logs() {
     let secret = fx::phase3_sentinel_value();
     let expected = format!("Bearer {secret}");
     let log = fx::empty_log_file_path();
@@ -135,7 +143,7 @@ async fn literal_secret_header_value_is_registered_for_redaction() {
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
 
-    // Trigger lazy spawn + a tool call so the header is processed and logged.
+    // Trigger lazy spawn + a tool call so the header is processed.
     let resp = timeout(
         HTTP_DEADLINE,
         common::call_tool(
@@ -154,12 +162,12 @@ async fn literal_secret_header_value_is_registered_for_redaction() {
     child.into_guard().shutdown().await.ok();
 
     // The literal secret must never appear raw in any log output.
-    // This is the observable side-effect of H-3: the literal value is registered
-    // for redaction at header-registration time, exactly as templated values are.
+    // This is a leak-regression guard only; positive redaction cannot be
+    // observed without a src/ log emission path.
     let logs = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !logs.contains(&secret),
-        "literal secret header value must be redacted; log contained sentinel:\n{logs}"
+        "literal secret header value must never leak; log contained sentinel:\n{logs}"
     );
 }
 

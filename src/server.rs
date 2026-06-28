@@ -17,7 +17,6 @@ use rmcp::model::{
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 
-use crate::config::CliConfig;
 use crate::error::ToolError;
 use crate::namespace::ActiveNamespace;
 use crate::registry::Registry;
@@ -36,31 +35,22 @@ const INVOKE_TOOL_DESC: &str = "Call a tool by server__tool name with arguments.
 /// The downstream aggregator server.
 #[derive(Debug, Clone)]
 pub struct Aggregator {
-    /// Carried verbatim from `--namespace` / `--config` for later phases.
-    #[allow(dead_code)]
-    config: CliConfig,
     registry: Option<Arc<Registry>>,
     namespace: Option<ActiveNamespace>,
 }
 
 impl Aggregator {
     /// Build a new aggregator from the resolved CLI configuration.
-    pub fn new(config: CliConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            config,
             registry: None,
             namespace: None,
         }
     }
 
     /// Build a new aggregator with a live upstream registry.
-    pub fn with_registry(
-        config: CliConfig,
-        registry: Arc<Registry>,
-        namespace: ActiveNamespace,
-    ) -> Self {
+    pub fn with_registry(registry: Arc<Registry>, namespace: ActiveNamespace) -> Self {
         Self {
-            config,
             registry: Some(registry),
             namespace: Some(namespace),
         }
@@ -397,6 +387,7 @@ fn sanitize_upstream_text(s: &str) -> String {
 /// Sanitize an upstream identifier for LLM-visible row keys without changing
 /// dispatch identity by length-capping it.
 fn sanitize_upstream_identifier(s: &str) -> String {
+    const CAP: usize = 200;
     // Defense-in-depth against a non-rmcp upstream sending an over-long raw tool name.
     s.chars()
         .map(|c| {
@@ -409,7 +400,7 @@ fn sanitize_upstream_identifier(s: &str) -> String {
         .collect::<String>()
         .trim()
         .chars()
-        .take(200)
+        .take(CAP)
         .collect()
 }
 

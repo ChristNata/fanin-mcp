@@ -22,7 +22,8 @@ This document states honestly what fanin-mcp protects against, what it cannot, a
 
 1. **No secrets on argv.** `cred set <server> <KEY>` reads the value from a hidden stdin prompt. Process listings and shell history never contain secret values. `cred list` prints key names only.
 2. **No secrets in logs.** A tracing redaction layer scrubs all resolved secret values from log output. An automated test injects a sentinel secret and asserts it never appears in any log line. This test is a release gate.
-   Log redaction is exact-substring matching of registered secret values — whole-secret appearances are caught and replaced with `[REDACTED]`; a secret that appears perturbed/partial (e.g. truncated by an upstream) is out of scope.
+    Log redaction is exact-substring matching of registered secret values — whole-secret appearances are caught and replaced with `[REDACTED]`; a secret that appears perturbed/partial (e.g. truncated by an upstream) is out of scope.
+    Since H-3, every value resolved from a server's `[headers]` section (literal strings included, not only `${VAR}` expansions) is registered for redaction; choose header values distinct from any operational text your tracing layer may emit.
 3. **Least-privilege injection.** Credential env vars are injected per-child at spawn time; no upstream inherits the aggregator's full environment or another server's secrets.
 4. **No secrets on disk outside the keychain.** Ever. The v1.1 tool-list disk cache contains tool metadata only, never credentials, and is fully reconstructible.
 5. **Credential backend chain.** `--credential-store` selects the *preferred* backend (default: keyring); the process environment is always the fallback (headless Linux, CI, containers). Failures state which backend failed and why.

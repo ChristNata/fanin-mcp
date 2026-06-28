@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+#[cfg(debug_assertions)]
+use process_wrap::tokio::ChildWrapper;
+use process_wrap::tokio::CommandWrap;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
 #[cfg(all(debug_assertions, any(windows, unix)))]
 use process_wrap::tokio::KillOnDrop;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
-use process_wrap::tokio::CommandWrap;
-#[cfg(debug_assertions)]
-use process_wrap::tokio::ChildWrapper;
 use rmcp::transport::child_process::TokioChildProcess;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
