@@ -109,7 +109,7 @@ All entries below: **Status: Accepted · Date: 2026-06** (initial design review)
 
 **Decision:** Public name `fanin-mcp` (fan-in: many inputs, one gate). Dual permissive license, Rust-ecosystem standard.
 **Why:** `mcpmux` is taken twice (a desktop gateway *and* an npm aggregator with a near-identical meta-tool concept); `plexus` and `backplane` are squatted crates. Dual licensing adds Apache's patent grant to MIT's compatibility at zero cost.
-**Open:** Final `cargo publish --dry-run` verification at repo creation; SECURITY.md contact email.
+**Resolved (oss-readiness cycle):** `[package]` metadata in place (`repository`, `homepage`, `readme`, `keywords`, `categories`) with `publish = true`; SECURITY.md contact is GitHub Security Advisories (private reporting — no email). **Open:** a final `cargo publish --dry-run` smoke remains a release-checklist step before the first publish.
 
 ## D-018 — Standalone product, zero knowledge of consumers
 

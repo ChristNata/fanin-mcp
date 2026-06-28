@@ -59,7 +59,7 @@ Quick-reference trap list for anyone (human or agent) touching this codebase. Fo
 
 19. **A secret shows up in a debug log line.** Easy to do once env maps get `Debug`-printed. → The tracing redaction layer scrubs resolved values, and the sentinel-secret test (release gate) catches regressions. Never `{:?}` a resolved env map outside it. ✅
 
-20. **A malicious upstream "speaks" to the model through its tool descriptions.** Upstream-provided names/descriptions flow into text the LLM reads — a prompt-injection channel by design. → Sanitize (strip newlines/control chars) + length-cap (~100 chars) everything upstream-provided before inclusion; SECURITY.md documents that this bounds, not eliminates, the channel. ✅
+20. **A malicious upstream "speaks" to the model through its tool descriptions.** Upstream-provided names/descriptions flow into text the LLM reads — a prompt-injection channel by design. → Sanitize (strip newlines/control chars) + length-cap everything upstream-provided before inclusion (descriptions/text capped ~100 chars; tool-name identifiers capped at 200 — defense-in-depth against a non-rmcp upstream emitting an over-long raw name); SECURITY.md documents that this bounds, not eliminates, the channel. ✅
 
 21. **`npx -y some-server` runs whatever was published five minutes ago.** Adding an upstream = executing its code as the user, and floating tags make every session a supply-chain event. → Docs and examples always pin versions (`@1.2.3`); config loader warns on unpinned npx invocations (nice-to-have).
 

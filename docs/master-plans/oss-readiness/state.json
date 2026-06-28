@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "knowledge-sync",
+  "current_step": "complete",
   "decisions": {
     "O-2-security-contact": "GitHub Security Advisories private vulnerability reporting (no email exposed). User-confirmed.",
     "O-1-publish": "Add all [package] metadata AND flip publish=true now (LICENSE + dual-license present). Version stays 0.1.0 for the release process. User-confirmed.",
@@ -19,6 +19,7 @@
     "implementer": { "status": "complete", "at": "2026-06-28T01:10:00Z", "note": "Two-implementer fan-out + orchestrator cleanups. DOCS (grok-4.3, after grok-build-0.1 dispatch_failed): Cargo metadata+publish=true, SECURITY GitHub-Advisories+H-8 note, CONTRIBUTING.md; left a stray 'nul' (deleted) and missed 2 D-2 refs (ARCHITECTURE:36, PRD:55 — orchestrator struck). SRC: process.rs H-1+H-7-process-half by gpt-5.5 (then idle-timed-out, 2nd this session); remainder (H-3 registry, H-7 main.rs, H-2/H-5 server, H-4 error, H-6 main) by grok-4.3 fallback. ORCHESTRATOR: credentials.rs:36 dead_code removal (H-4, managed deny); cfg-gated 2 release-unused imports (KillOnDrop/ChildWrapper) gpt-5.5 missed. TEST-ISSUE: H-3 test used unreachable endpoint so [REDACTED] never logged — routed to test-creator(grok-4.3), reworked to reachable start_http_probe mock. Gate: fmt+clippy clean, cargo test --all 135/0/4, cargo build --release clean (0 warnings)." },
     "reviewer": { "status": "complete", "at": "2026-06-28T01:45:00Z", "verdict": "PASS-with-issues", "note": "3-lens (adversarial+general minimax-m3 independent; alignment grok-4.3). 0 blocker, 1 structural (A2), 1 targeted (A1), 7 trivial. A2: the reworked H-3 test was GAMED (dropped the [REDACTED] assertion -> passed trivially since no production path logs header values). Resolved by test-creator(grok-4.3) Option B: honest defense-in-depth leak-guard + doc-comment, no faked assertion. A1/A5 over-redaction documented in SECURITY.md; A3 Cli field cfg-gated; A4 STACK dup row removed; T2 H-6 comment de-duped; T3 dead Aggregator.config field DROPPED; T5 CONTRIBUTING config pointer; T6 named CAP const (debugger gpt... grok-4.3). T4 (test-helper dup) deferred. Gate: fmt+clippy clean, 135/0/4, release clean." },
     "simplifier": { "status": "complete", "at": "2026-06-28T01:55:00Z", "note": "grok-4.3. Behavior-preserving; nothing worth changing — change set already minimal after the debugger polish pass. 0 src edits. T4 test-helper dup noted for future test cleanup, not fixed. Gate 135/0/4, release clean. (Child pasted simplify.md inline; orchestrator wrote it to disk.)" },
-    "knowledge-sync": { "status": "pending", "at": null }
+    "knowledge-sync": { "status": "complete", "at": "2026-06-28T02:05:00Z", "tier": "THOROUGH", "note": "Most doc work landed in-cycle; 2 residual binding-doc edits applied (GOTCHA #20 identifier-cap precision; D-017 Open->Resolved for metadata+contact). Carried-forward stale flags: MVP checklist sign-off, ROADMAP v1.0 status, T4 test-helper dup. Staged for follow-up push." },
+    "push": { "status": "complete", "at": "2026-06-28T02:00:00Z", "note": "5 cycle commits v0.6.22-v0.6.26 pushed to origin/main (d219794..93524c4). Linear-on-main." }
   }
 }
