@@ -194,11 +194,27 @@ async fn literal_secret_header_value_is_redacted_in_logs() {
         seen.contains(&expected),
         "probe must observe the literal Authorization header value"
     );
+
+    // The upstream logging notification -> redacted-log write is asynchronous:
+    // forward.rs routes it to an mpsc-backed, per-line-flushed writer task in the
+    // child. Poll the log WHILE THE CHILD IS ALIVE until the redaction marker
+    // lands, so the assertion does not race the async write (it raced on macOS
+    // CI with a single immediate read). The writer flushes per line, so once the
+    // marker is present it is durable.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut logs = String::new();
+    while std::time::Instant::now() < deadline {
+        logs = std::fs::read_to_string(&log).unwrap_or_default();
+        if logs.contains("[REDACTED]") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     child.into_guard().shutdown().await.ok();
 
-    let logs = std::fs::read_to_string(&log).unwrap_or_default();
-    // The literal secret, echoed via the upstream logging notification, must be
-    // redacted — proving H-3 registered the literal header value.
+    // With H-3 the registered literal `Bearer <secret>` is redacted; without it
+    // the raw value would appear and the marker would never land (the poll then
+    // times out and this assertion fails — the test still bites).
     assert!(
         logs.contains("[REDACTED]"),
         "redaction marker must appear for the literal header value echoed via the upstream logging notification; log:\n{logs}"
