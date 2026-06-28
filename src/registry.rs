@@ -123,9 +123,7 @@ impl Registry {
         let mut resolved_headers = HashMap::new();
         for (name, raw) in &server_config.headers {
             let resolved = crate::process::resolve_env_value(&*store, cred_choice, server, raw)?;
-            if raw.contains("${") {
-                crate::process::register_secret(&resolved);
-            }
+            crate::process::register_secret(&resolved);
             resolved_headers.insert(name.clone(), resolved);
         }
         let resolved_cwd = if server_config.transport_kind() == "stdio" {

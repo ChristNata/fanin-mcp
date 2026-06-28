@@ -6,11 +6,13 @@ use std::process::Stdio;
 
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
-#[cfg(any(windows, unix))]
+#[cfg(all(debug_assertions, any(windows, unix)))]
 use process_wrap::tokio::KillOnDrop;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
-use process_wrap::tokio::{ChildWrapper, CommandWrap};
+use process_wrap::tokio::CommandWrap;
+#[cfg(debug_assertions)]
+use process_wrap::tokio::ChildWrapper;
 use rmcp::transport::child_process::TokioChildProcess;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -52,7 +54,7 @@ pub fn register_secret(secret: &str) {
     }
     let mut set = redacted_secrets()
         .lock()
-        .expect("redacted secrets poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     set.insert(secret.to_string());
 }
 
@@ -60,7 +62,7 @@ pub fn register_secret(secret: &str) {
 pub fn redact(text: &str) -> String {
     let set = redacted_secrets()
         .lock()
-        .expect("redacted secrets poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut out = text.to_string();
     for secret in set.iter() {
         if !secret.is_empty() {
@@ -307,6 +309,7 @@ pub fn spawn_stdio_transport(
 
 /// Spawn a long-lived descendant used by the Phase 5 immediate-startup
 /// containment test.
+#[cfg(debug_assertions)]
 pub fn spawn_immediate_descendant(
     marker_path: &Path,
 ) -> Result<ImmediateDescendantGuard, std::io::Error> {
@@ -337,10 +340,12 @@ pub fn spawn_immediate_descendant(
 }
 
 /// Retains the process containment handle for the immediate test descendant.
+#[cfg(debug_assertions)]
 pub struct ImmediateDescendantGuard {
     child: Box<dyn ChildWrapper>,
 }
 
+#[cfg(debug_assertions)]
 impl ImmediateDescendantGuard {
     /// Returns the spawned descendant PID.
     pub fn id(&self) -> Option<u32> {
@@ -672,7 +677,9 @@ impl Visit for JsonFieldVisitor {
 fn log_sender(log_file: PathBuf, server_name: String) -> mpsc::Sender<String> {
     let key = (log_file.clone(), server_name.clone());
     let writers = LOG_WRITERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut writers = writers.lock().expect("log writer registry poisoned");
+    let mut writers = writers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(sender) = writers.get(&key) {
         return sender.clone();
     }

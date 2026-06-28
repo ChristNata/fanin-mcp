@@ -52,7 +52,7 @@ A standalone stdio MCP proxy — `fanin-mcp` — that sits between the LLM clien
 
 11. **Process-tree cleanup on all platforms.** Spawned upstream process trees must not orphan children on session end or aggregator crash: Windows Job Objects (kill-on-close) and Unix process groups, e.g. via the `process-wrap`/`command-group` approach. Verified by a hard-kill test (kill aggregator, assert zero surviving upstream processes).
 
-12. **Upstream stderr capture.** Child stderr is piped, prefixed `[server-name]`, and written to the aggregator's log file (never mixed into the aggregator's own stderr). Optional `--passthrough-stderr` debug flag.
+12. **Upstream stderr capture.** Child stderr is piped, prefixed `[server-name]`, and written to the aggregator's log file (never mixed into the aggregator's own stderr).
 
 13. **Security hardening (see SECURITY.md).** Log redaction of secret values (enforced by an automated test); sanitization of upstream-provided tool names/descriptions before inclusion in any text the LLM reads (strip newlines/control chars, length-cap) to bound description-based prompt injection; `Cargo.lock` committed; `cargo audit` + `cargo deny` in CI.
 

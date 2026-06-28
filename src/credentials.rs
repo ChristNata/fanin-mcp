@@ -33,7 +33,6 @@ pub enum CredentialStoreChoice {
 /// `get` is invoked at spawn time by the registry to resolve `${VAR}` env
 /// placeholders (preferred backend → process-env fallback → structured error);
 /// `set` / `delete` / `list_names` back the `cred set | rm | list` subcommands.
-#[allow(dead_code)]
 pub trait CredentialStore: Send + Sync {
     /// Retrieve a credential value if present.
     fn get(&self, server: &str, key: &str) -> Result<Option<String>, String>;

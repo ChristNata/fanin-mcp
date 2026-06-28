@@ -65,8 +65,6 @@ pub enum ToolError {
     /// A `${VAR}` reference in a server's env (or headers) could not be resolved.
     /// Produced at spawn time when preferred backend + env fallback both lack the key.
     /// Rendered as a structured tool error (never a JSON-RPC error).
-    /// Allowed dead_code in Phase 1; wired by Phase 2 interpolation.
-    #[allow(dead_code)]
     CredentialResolution { server: String, key: String },
 }
 

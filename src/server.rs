@@ -37,6 +37,7 @@ const INVOKE_TOOL_DESC: &str = "Call a tool by server__tool name with arguments.
 #[derive(Debug, Clone)]
 pub struct Aggregator {
     /// Carried verbatim from `--namespace` / `--config` for later phases.
+    #[allow(dead_code)]
     config: CliConfig,
     registry: Option<Arc<Registry>>,
     namespace: Option<ActiveNamespace>,
@@ -66,10 +67,7 @@ impl Aggregator {
     }
 
     /// Build the three static meta-tools.
-    fn meta_tools(&self) -> Vec<Tool> {
-        // The binding keeps carried CLI config live without per-tool cost.
-        let _ = &self.config;
-
+    fn meta_tools() -> Vec<Tool> {
         vec![
             list_tools_tool(),
             get_tool_schema_tool(),
@@ -96,7 +94,7 @@ impl ServerHandler for Aggregator {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(self.meta_tools())))
+        std::future::ready(Ok(ListToolsResult::with_all_items(Self::meta_tools())))
     }
 
     /// Return a structured not-implemented `CallToolResult` for any tool name.
@@ -399,6 +397,7 @@ fn sanitize_upstream_text(s: &str) -> String {
 /// Sanitize an upstream identifier for LLM-visible row keys without changing
 /// dispatch identity by length-capping it.
 fn sanitize_upstream_identifier(s: &str) -> String {
+    // Defense-in-depth against a non-rmcp upstream sending an over-long raw tool name.
     s.chars()
         .map(|c| {
             if should_neutralize_upstream_char(c) {
@@ -409,7 +408,9 @@ fn sanitize_upstream_identifier(s: &str) -> String {
         })
         .collect::<String>()
         .trim()
-        .to_string()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 fn should_neutralize_upstream_char(c: char) -> bool {

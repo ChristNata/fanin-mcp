@@ -83,7 +83,7 @@ Quick-reference trap list for anyone (human or agent) touching this codebase. Fo
 
 28. **Two concurrent sessions, one upstream that binds a port → second session's tool calls fail confusingly.** Per-session architecture means per-session upstream instances (D-001's accepted cost). → Documented limitation; `singleton` warning field on the v1.2 roadmap.
 
-29. **Upstream debug spew floods the client UI.** Child stderr inherited the aggregator's stderr, which CC surfaces. → Pipe child stderr, prefix `[server]`, write to the log file; `--passthrough-stderr` for debugging only. ✅
+29. **Upstream debug spew floods the client UI.** Child stderr inherited the aggregator's stderr, which CC surfaces. → Pipe child stderr, prefix `[server]`, write to the log file. ✅
 
 30. **A directory-scoped server (e.g. Morph fast-apply) edits files in the wrong tree.** Servers like `@morphllm/morphmcp` operate on a working directory and auto-detect the workspace root (`.git`, `package.json`, `Cargo.toml`…), falling back to the current directory. Spawned as a child, the upstream inherits *fanin-mcp's* CWD — not the coding session's project root — so auto-detection/fallback can target the wrong files. The failure is silent and confusing ("Morph edited some other repo"). → Set a per-server `cwd` in config (supports `${VAR}`); `process.rs` applies it via `Command::current_dir` at spawn — stdio only, ignored for HTTP, with empty/whitespace rejected both at config-load and after `${VAR}` resolution. ✅ (D-019; ARCHITECTURE.md "Child working directory".)
 

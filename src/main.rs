@@ -28,9 +28,11 @@ use crate::namespace::ActiveNamespace;
 use crate::registry::Registry;
 use crate::server::Aggregator;
 
+#[cfg(debug_assertions)]
 /// Private argv sentinel for the Phase 5 immediate-descendant test child.
 pub const IMMEDIATE_DESCENDANT_SENTINEL: &str = "__fanin_immediate_descendant__";
 
+#[cfg(debug_assertions)]
 const IMMEDIATE_DESCENDANT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The top-level CLI.
@@ -111,6 +113,7 @@ enum CredAction {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(debug_assertions)]
     if let Some(marker_path) = parse_immediate_descendant_sentinel() {
         return run_immediate_descendant(marker_path).await;
     }
@@ -119,6 +122,9 @@ async fn main() -> ExitCode {
     let log_level = match parse_log_level(&cli.log_level) {
         Ok(level) => level,
         Err(()) => {
+            // Diagnostics before `Cli::parse()` / before tracing-init use eprintln!;
+            // everything after init uses tracing; `cred list` is intentionally raw stderr
+            // for the test harness.
             eprintln!("invalid --log-level: {}", cli.log_level);
             return ExitCode::FAILURE;
         }
@@ -138,6 +144,7 @@ async fn main() -> ExitCode {
         None
     };
 
+    #[cfg(debug_assertions)]
     let _immediate_descendant = match cli.spawn_immediate_descendant.as_ref() {
         Some(marker_path) => match crate::process::spawn_immediate_descendant(marker_path) {
             Ok(guard) => {
@@ -163,6 +170,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[cfg(debug_assertions)]
 fn parse_immediate_descendant_sentinel() -> Option<PathBuf> {
     let mut args = std::env::args_os().skip(1);
     let first = args.next()?;
@@ -172,8 +180,12 @@ fn parse_immediate_descendant_sentinel() -> Option<PathBuf> {
     None
 }
 
+#[cfg(debug_assertions)]
 async fn run_immediate_descendant(marker_path: PathBuf) -> ExitCode {
     if let Err(e) = std::fs::write(&marker_path, std::process::id().to_string()) {
+        // Diagnostics before `Cli::parse()` / before tracing-init use eprintln!;
+        // everything after init uses tracing; `cred list` is intentionally raw stderr
+        // for the test harness.
         eprintln!(
             "immediate descendant failed to write marker {}: {e}",
             marker_path.display()
@@ -208,6 +220,7 @@ async fn run_serve(config: CliConfig) -> ExitCode {
         match crate::config::load_and_validate(path, &config.namespace) {
             Ok(loaded) => {
                 tracing::info!(path = %path.display(), "config loaded");
+                #[cfg(debug_assertions)]
                 if let Some(marker_path) = immediate_descendant_marker_from_config(&loaded) {
                     match crate::process::spawn_immediate_descendant(&marker_path) {
                         Ok(_guard) => {
@@ -267,6 +280,7 @@ async fn run_serve(config: CliConfig) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(debug_assertions)]
 fn immediate_descendant_marker_from_config(config: &crate::config::TomlConfig) -> Option<PathBuf> {
     for server in config.servers.values() {
         let mut args = server.args.iter();

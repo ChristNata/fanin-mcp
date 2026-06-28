@@ -26,6 +26,7 @@ Every dependency must justify itself — the small tree is a security feature we
 | `process-wrap` / `command-group` | Process-tree lifetime | Job Objects (Windows) + process groups (Unix) behind one API (D-009). May require a thin custom child transport if rmcp's `TokioChildProcess` can't be wrapped — isolated in `process.rs` |
 | `dirs` | Platform paths | Config (`%APPDATA%` / `~/.config`) and the v1.1 cache dir |
 | `schemars` | JSON Schema helpers | Meta-tool input schemas (manual construction preferred over `#[tool]` macros — see AGG-MCP.md) |
+| `schemars` | JSON Schema helpers | Meta-tool input schemas (manual construction preferred over `#[tool]` macros — see AGG-MCP.md) |
 
 **Transitive-only, tolerated:** the reqwest/hyper HTTP-**client** tree (`reqwest`, `hyper`, `tower`/`tower-http`, `url`, the ICU/idna stack) pulled by rmcp's `transport-streamable-http-client-reqwest` for remote upstreams — a client, not a listener, so the no-HTTP-server identity holds; TLS (`rustls`) is only linked when a real remote needs HTTPS (trimmed for the loopback test path). Direct add: `http` (for `HeaderName`/`HeaderValue`) and target-gated `libc` on Linux (for `PR_SET_PDEATHSIG`). The whole tree stays under the `< 10 MB` stripped-binary budget (CI-checked; measured 8.27 MB) and passes `cargo deny`. Windows Job Object bindings come via `process-wrap` (no separate `windows`/`win32job` needed).
 

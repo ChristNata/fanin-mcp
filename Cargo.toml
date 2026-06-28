@@ -5,7 +5,12 @@ edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 description = "A standalone, stdio-native MCP proxy that federates many upstream MCP servers behind a single endpoint."
-publish = false
+repository = "https://github.com/ChristNata/fanin-mcp"
+homepage = "https://github.com/ChristNata/fanin-mcp"
+readme = "README.md"
+keywords = ["mcp", "proxy", "llm", "stdio", "aggregator"]
+categories = ["command-line-utilities", "development-tools"]
+publish = true
 
 # Auto-discovery is disabled so the two binary targets and the single
 # integration test target are fully explicit. Without this, cargo would

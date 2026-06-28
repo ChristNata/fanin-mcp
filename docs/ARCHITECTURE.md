@@ -33,7 +33,7 @@ Traffic is bidirectional: downstream requests (tool calls) flow up to upstreams;
 
 ### `main.rs` — Entry point + subcommands
 - Subcommands: *(default: serve)*, `cred set|list|rm`, future: `warm`, `auth`, `install`
-- Parse CLI args (`--config`, `--namespace`, `--log-level`, `--log-file`, `--credential-store`, `--passthrough-stderr`)
+- Parse CLI args (`--config`, `--namespace`, `--log-level`, `--log-file`, `--credential-store`)
 - Load and validate TOML config (including server-name validation)
 - Initialize credential store
 - Build `Registry` with namespace-filtered server list
@@ -160,7 +160,7 @@ MCP upstreams can send requests *to* the aggregator (their client). Ignoring the
 - **Windows:** spawn `cmd /c npx ...` children inside a Job Object with kill-on-close, so dropping the handle (or aggregator crash) kills the **entire tree** — no orphaned `node.exe`. (`#[cfg(windows)]`.)
 - **Unix:** new process group per child (`setsid`); teardown kills the group. (`#[cfg(unix)]`.)
 - Prefer a unified wrapper (the `process-wrap` / `command-group` approach) behind one API; note rmcp's `TokioChildProcess` constructs the command itself, so this may require a thin custom child-process transport — contained, isolated in this module.
-- **stderr:** piped, line-buffered, `[server]`-prefixed, written to the log file. `--passthrough-stderr` mirrors to the aggregator's stderr for debugging.
+- **stderr:** piped, line-buffered, `[server]`-prefixed, written to the log file.
 - Polite-then-forceful teardown: close child stdin, brief grace period, then kill tree.
 
 ### `namespace.rs` — Namespace ACL
