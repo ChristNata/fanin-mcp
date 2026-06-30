@@ -1,15 +1,15 @@
 # fanin-mcp — Roadmap
 
-Status legend: 🔨 in progress · 📋 planned · 💭 exploring · 🚫 non-goal
+Status legend: ✅ released · 📋 planned · 💭 exploring · 🚫 non-goal
 
-## v1.0 — MVP (🔨 ~12 working days)
+## v1.0 — MVP (✅ released)
 
 The shippable core. Full plan in [MVP.md](docs/MVP.md); requirements in [PRD.md](docs/PRD.md).
 
 - Stdio MCP proxy: 3 meta-tools (`list_tools`, `get_tool_schema`, `invoke_tool`), static descriptions
-- Lazy upstream connections (stdio + Streamable HTTP), per-server init guards, non-serializing concurrency
+- Lazy upstream connections (stdio + loopback Streamable HTTP), per-server init guards, non-serializing concurrency
 - Namespace ACLs (`--namespace`) as the primary permission layer; conservative annotations on `invoke_tool`
-- Credentials: OS keychain + env fallback, `cred set|list|rm` subcommands, per-server least-privilege injection, static header injection for remote upstreams
+- Credentials: OS keychain + env fallback, `cred set|list|rm` subcommands, per-server least-privilege injection, static header injection for Streamable-HTTP upstreams (loopback `http://` in v1.0)
 - Clean rejection of upstream-originated requests (sampling/elicitation), empty `roots/list` — no silent hangs
 - Per-server `timeout_secs` (default 60s) + cancellation forwarding
 - Structured errors (`isError: true` + `recoverable`) — verified readable on CC and OC
@@ -26,12 +26,13 @@ Roughly ordered by expected impact:
 
 1. **Cached auto-generated `list_tools` description.** Reconstructible disk cache of upstream tool inventories (keyed by command+args hash) + `warm` subcommand. Restores the "LLM knows what's connected without a round-trip" UX without violating lazy startup.
 2. **Capability-mirrored forwarding.** Mirror the downstream client's declared capabilities to upstreams; forward sampling/elicitation/roots requests downstream and relay responses. Unlocks upstreams that *require* these features, adapting per client at runtime.
-3. **OAuth 2.1 for remote upstreams.** Out-of-band `fanin-mcp auth <server>` subcommand: browser flow, PKCE, token storage in the existing credential store, refresh handling. Unlocks Linear, Notion, Atlassian, Sentry and other OAuth-only remotes.
-4. **`install` subcommand.** `fanin-mcp install --client <claude|opencode> --namespace <id>` writes the correct entry into each CLI's config. The adoption lever for "every major CLI" — each new client becomes a small adapter here instead of a docs page.
-5. **`list_server_status` meta-tool.** Connectivity + last-error per upstream so the LLM can self-diagnose.
-6. **`tools/list_changed` push.** Re-fetch on upstream change notification, push to client (requires verifying client refetch behavior).
-7. **Per-server `readonly = true`.** Reject calls to tools whose upstream annotations aren't read-only — namespace ACL's enforcement-grade sibling.
-8. **Progress-based idle timeout + progress forwarding.** Reset the per-call clock on upstream `notifications/progress`; relay progress downstream.
+3. **Native remote-HTTPS Streamable-HTTP upstreams.** v1.0 ships Streamable-HTTP for loopback `http://` only; no TLS backend is linked. Remote/HTTPS upstreams are reached via stdio/npx today. Planned: enable reqwest `rustls-tls` for native remote HTTPS.
+4. **OAuth 2.1 for remote upstreams.** Out-of-band `fanin-mcp auth <server>` subcommand: browser flow, PKCE, token storage in the existing credential store, refresh handling. Unlocks Linear, Notion, Atlassian, Sentry and other OAuth-only remotes.
+5. **`install` subcommand.** `fanin-mcp install --client <claude|opencode> --namespace <id>` writes the correct entry into each CLI's config. The adoption lever for "every major CLI" — each new client becomes a small adapter here instead of a docs page.
+6. **`list_server_status` meta-tool.** Connectivity + last-error per upstream so the LLM can self-diagnose.
+7. **`tools/list_changed` push.** Re-fetch on upstream change notification, push to client (requires verifying client refetch behavior).
+8. **Per-server `readonly = true`.** Reject calls to tools whose upstream annotations aren't read-only — namespace ACL's enforcement-grade sibling.
+9. **Progress-based idle timeout + progress forwarding.** Reset the per-call clock on upstream `notifications/progress`; relay progress downstream.
 
 ## v1.2+ — Breadth (💭)
 

@@ -21,7 +21,7 @@ claude session                       claude session
 ├── obsidian-mcp                           ├── (lazily spawns postgres-mcp)
 ├── morph-mcp                              ├── (lazily spawns obsidian-mcp)
 ├── context7-mcp                           ├── (lazily spawns morph-mcp)
-└── filesystem-mcp                         └── (lazily connects context7 remote)
+└── filesystem-mcp                         └── (lazily spawns context7 via npx)
 
 BEFORE: 5 processes spawned eagerly     AFTER: 1 process, lazy on demand
 30–60K tokens of tool schemas upfront   ~600 tokens (3 meta-tools)
@@ -34,16 +34,23 @@ Creds duplicated per project/CLI        Creds once, in the OS keychain
 - **Progressive disclosure.** The LLM sees 3 meta-tools (`list_tools`, `get_tool_schema`, `invoke_tool`). Tool inventories and full schemas are fetched on demand, entering context as compactable tool *results*, not permanent tool definitions.
 - **Namespace-based access control.** `--namespace <id>` scopes which servers (and optionally which tools per server) are visible. This is the primary permission layer.
 - **Lazy connections.** Upstreams are spawned/connected on the first tool call that targets them — never at startup.
+- **Streamable HTTP is loopback-only in v1.0.0.** `transport = "streamable-http"` supports loopback `http://` upstreams only; no TLS backend is linked. Remote servers are reached exclusively via stdio/npx upstreams (e.g. `npx -y @upstash/context7-mcp`).
 - **No silent hangs on bidirectional traffic.** Upstream-originated requests (`sampling/createMessage`, `elicitation/create`) get immediate structured rejections and `roots/list` gets an empty list — upstreams never hang waiting on the proxy. Capability-mirrored forwarding to capable clients is planned for v1.1.
 - **Structured errors.** Upstream failures return as readable JSON inside the tool result (`isError: true`) with a `recoverable` flag — verified to reach the model as conversational content on both CC and OC.
 
 ## Quick start
 
+### Install
+
+- Rust users: `cargo install fanin-mcp`
+- Everyone else: download the latest prebuilt binary from GitHub Releases.
+
 ```bash
 # Build
 cargo build --release
 
-# Configure upstream servers
+# Create a config and pass its path with --config
+# Suggested locations you can point --config at:
 # ~/.config/fanin-mcp/config.toml          (Linux/macOS)
 # %APPDATA%\fanin-mcp\config.toml          (Windows)
 
@@ -51,13 +58,34 @@ cargo build --release
 fanin-mcp cred set postgres POSTGRES_URL
 
 # Add to Claude Code (user scope — all projects)
-claude mcp add --transport stdio --scope user fanin-mcp -- /path/to/fanin-mcp
+claude mcp add --transport stdio --scope user fanin-mcp -- /path/to/fanin-mcp --config /path/to/config.toml
 
 # Add to Claude Code (per-project with namespace)
-claude mcp add --transport stdio fanin-mcp -- /path/to/fanin-mcp --namespace my-project
+claude mcp add --transport stdio fanin-mcp -- /path/to/fanin-mcp --config /path/to/config.toml --namespace my-project
 
 # Add to OpenCode (in opencode.json)
-# "mcp": { "fanin-mcp": { "type": "local", "command": ["/path/to/fanin-mcp", "--namespace", "default"] } }
+# "mcp": { "fanin-mcp": { "type": "local", "command": ["/path/to/fanin-mcp", "--config", "/path/to/config.toml", "--namespace", "default"] } }
+```
+
+Stdio upstreams spawn under a cleared environment. Script runners such as
+`node`, `npx`, `cmd`, and `python` need required variables passed through
+explicitly in that server's `env` table.
+
+```toml
+[servers.context7]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+[servers.context7.env]
+PATH = "${PATH}"
+PATHEXT = "${PATHEXT}"
+SYSTEMROOT = "${SYSTEMROOT}"
+APPDATA = "${APPDATA}"
+LOCALAPPDATA = "${LOCALAPPDATA}"
+TEMP = "${TEMP}"
+USERPROFILE = "${USERPROFILE}"
+COMSPEC = "${COMSPEC}"
 ```
 
 ## How the LLM uses it

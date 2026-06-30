@@ -21,6 +21,7 @@ This document states honestly what fanin-mcp protects against, what it cannot, a
 ## Enforced Practices (codebase guarantees)
 
 1. **No secrets on argv.** `cred set <server> <KEY>` reads the value from a hidden stdin prompt. Process listings and shell history never contain secret values. `cred list` prints key names only.
+   `${VAR}` credential resolution applies to `env`, `headers`, and `cwd` only — never `args`. A secret placed literally in `args` (for example, a Postgres URL with an inline password) is passed verbatim and is not covered by log redaction, which only scrubs registered resolved values. Put secrets in env via `${VAR}` and `cred set`, not in `args`.
 2. **No secrets in logs.** A tracing redaction layer scrubs all resolved secret values from log output. An automated test injects a sentinel secret and asserts it never appears in any log line. This test is a release gate.
     Log redaction is exact-substring matching of registered secret values — whole-secret appearances are caught and replaced with `[REDACTED]`; a secret that appears perturbed/partial (e.g. truncated by an upstream) is out of scope.
     Since H-3, every value resolved from a server's `[headers]` section (literal strings included, not only `${VAR}` expansions) is registered for redaction; choose header values distinct from any operational text your tracing layer may emit.
@@ -68,7 +69,7 @@ postgres = ["query", "list_tables"]  # write tools (insert, update, ...) are the
 
 - `Cargo.lock` committed; `rmcp` and all dependencies pinned.
 - `cargo deny` (bans / licenses / sources) runs in CI on every commit. **Advisory scanning is temporarily paused:** the RustSec advisory DB now ships CVSS 4.0 entries that the current RustSec parser tooling (both `cargo audit` and `cargo deny` 0.19.x) rejects on load (`unsupported CVSS version: 4.0`). It will be re-enabled (`cargo deny check`) once the tooling supports CVSS 4.0. The deliberately small, exact-pinned dependency tree (with committed `Cargo.lock`) bounds the exposure in the interim.
-- Deliberately minimal dependency tree (no web framework, no database). Remote Streamable-HTTP upstreams pull a reqwest/hyper **HTTP client** (a client, never a listener — the no-daemon/no-port non-goal holds); for the loopback test path TLS features are trimmed, and a TLS stack is only linked when a real remote upstream requires HTTPS. `cargo deny` (licenses/bans/sources) and the `< 10 MB` stripped-binary budget keep the tree honest in CI.
+- Deliberately minimal dependency tree (no web framework, no database). Streamable-HTTP upstreams use a reqwest/hyper **HTTP client** for loopback `http://` only (a client, never a listener — the no-daemon/no-port non-goal holds). No TLS stack is linked in this build; native remote HTTPS is a planned ROADMAP item via reqwest `rustls-tls`. `cargo deny` (licenses/bans/sources) and the `< 10 MB` stripped-binary budget keep the tree honest in CI.
 - Release binaries published with checksums and signatures.
 - Reproducible release builds are a goal; deviations documented.
 
