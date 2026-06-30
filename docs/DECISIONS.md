@@ -32,12 +32,14 @@ All entries below: **Status: Accepted · Date: 2026-06** (initial design review)
 **Decision:** `invoke_tool` arguments pass to upstreams as raw `serde_json::Value` — never parsed, validated, or transformed. Results (all content block types) return unmodified.
 **Why:** Protocol-agnostic, zero maintenance when upstream schemas change, no corruption of non-text content.
 **Rejected:** Proxy-side schema validation ("helpful" errors aren't worth the drift risk and maintenance).
+**Scope of "unmodified" (precision):** the *values* are byte-identical — text strings, base64 image/resource data, and `structuredContent` are forwarded byte-for-byte. The surrounding JSON *envelope* is re-serialized by rmcp's typed model (`peer().call_tool()` hands back a deserialized `CallToolResult`, not raw bytes), so object **key order is normalized** and absent optional fields (`_meta`, `annotations`) may be emitted as `null`. JSON key order is non-normative, so this is fidelity-preserving; "byte-faithful" in this repo means content-value fidelity, not envelope-byte equality. True raw-frame forwarding would require bypassing the typed rmcp client — deliberately not done.
 
 ## D-005 — Errors as `CallToolResult { isError: true }`, never JSON-RPC errors
 
 **Decision:** All upstream failures return structured JSON (`server`, `tool`, `code`, `message`, `recoverable`) inside a tool result.
 **Why:** Keeps the error in the conversation where the LLM can read it, reason, and retry. JSON-RPC errors surface as opaque failures. **Empirically verified on both CC and OC** that such results reach the model readable and parseable.
 **Consequence:** The error JSON shape is public API (SemVer-major to break).
+**Origin distinction (for callers):** this 5-key shape covers **fanin-origin** failures only — routing, namespace, credential, transport/disconnect, and timeout errors that the aggregator itself detects (`server`/`tool` are always present, either may be `null`). An **upstream-origin** error — a tool that itself returns `CallToolResult { isError: true }` (e.g. a SQL error body) — is relayed with the **upstream's own shape, unrewritten** (it may carry fewer or different keys). So a caller seeing `{code, message, recoverable}` with no `server`/`tool` is reading the upstream's body, not a fanin error. fanin never rewrites an upstream error result (D-004).
 
 ## D-006 — Namespace ACL is the primary permission layer
 

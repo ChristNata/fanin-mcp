@@ -113,7 +113,7 @@ Implements `rmcp::ServerHandler`.
 2. Namespace ACL check
 3. `registry.get_or_connect(server)` (lazy)
 4. Forward `tools/call` with **raw `serde_json::Value` arguments — no parsing, validation, or transformation**
-5. Return the upstream result **byte-faithfully**: all content block types (text, image, embedded resource, resource link, structuredContent) pass through unmodified
+5. Return the upstream result **byte-faithfully**: all content block types (text, image, embedded resource, resource link, structuredContent) pass through with their **values** byte-identical. The JSON envelope is re-serialized by rmcp's typed `CallToolResult` (key order normalized; absent `_meta`/`annotations` may render as `null`) — non-normative, so content fidelity holds. See D-004 for the precise scope of "byte-faithful."
 
 **Description strategy (MVP vs v1.1):** MVP ships static meta-tool descriptions; the per-server `description` config field optionally enriches `list_tools` *results*. This preserves lazy connections — the aggregator never fans out to upstreams at session start. v1.1 adds a reconstructible disk cache of upstream tool lists (keyed by hash of command+args, at the platform cache dir, optionally pre-populated via `fanin-mcp warm`) used to auto-enrich the description. The cache is not authoritative state — deleting it only costs one re-fetch.
 
