@@ -1,0 +1,23 @@
+{
+  "feature": "schema-relay-fidelity",
+  "scope": "flat",
+  "stack": "rust",
+  "tier": "thorough",
+  "current_step": "test-creator",
+  "decisions": {
+    "I1-sanitization-stance": "KEEP the documented stance (transparent-ish proxy: neutralize C0/C1/DEL/bidi/zero-width control chars in LLM-visible display annotations only; pass natural-language description text, schema validation strings (enum/const/default/pattern), and invoke_tool arg+result bytes through verbatim per D-004; injection defense lives at the inference layer). NO natural-language scrubbing, NO untrusted-content envelope. User-confirmed. Action is test+doc LOCK only, no behavior change.",
+    "I2-truncation-fix": "The ~100-char cap is a list_tools-row summary control ONLY (documented in SECURITY.md + GOTCHA #20). It currently LEAKS into get_tool_schema annotation strings via the shared sanitize_upstream_text (server.rs:369), silently truncating real argument docs mid-word. FIX: decouple control-neutralization (applies to both list_tools rows AND get_tool_schema annotations) from length-capping (list_tools rows ONLY). get_tool_schema annotations stay control-neutralized + single-line but FULL-LENGTH. Orchestrator-driven; aligns code to documented intent.",
+    "I2-test-contract-conflict": "tests/integration/sanitization.rs lines ~411-446 (get_tool_schema_sanitizes_poisoned_metadata_preserves_shape) and ~946-968 (F3 annotation block) currently ASSERT get_tool_schema title/description/$comment are <= DESC_CAP(120). Those assertions LOCK the Issue-2 bug. test-creator (sole test authority) must FLIP them to assert FULL pass-through (no cap), keeping the control-free + single-line assertions. list_tools-row cap assertions stay unchanged."
+  },
+  "cycle_model": "linear-on-main (checkpoint commits to main, end-of-cycle push after user confirms; knowledge-sync after push)",
+  "origin": "External stress test (30 concurrent agents, 414 calls): ROUTING/CONCURRENCY layer fully healthy. Two non-routing findings. ISSUE 1 (HIGH, sanitization stance) — validated as ALREADY-DECIDED design (D-004 + SECURITY.md + GOTCHA #20); user locked the keep-stance option; action = regression-test the contract (invoke control-char round-trip) + sharpen SECURITY.md. ISSUE 2 (MEDIUM, silent ~100-char truncation in get_tool_schema) — validated as a GENUINE bug: the list-row cap leaks into the schema-detail fidelity path; fix = decouple cap from control-strip; requires flipping existing test assertions.",
+  "steps": {
+    "planner": { "status": "complete", "at": "2026-06-30T16:04:00Z", "note": "gpt-5.5. 4 sequential phases: P1 test-contract correction (flip stale get_tool_schema cap assertions + add 2 regressions), P2 src decouple (separate control-neutralization from list_tools-row length cap), P3 docs (SECURITY.md + GOTCHA #20 name invoke verbatim channel + row-only cap), P4 gate. tests.md is explicitly anti-gaming (exact full-content + distinctive post-cap suffix; rejects weak len()>cap). 0 open questions, scope clean." },
+    "test-creator": { "status": "pending" },
+    "implementer": { "status": "pending" },
+    "reviewer": { "status": "pending" },
+    "simplifier": { "status": "pending" },
+    "knowledge-sync": { "status": "pending" },
+    "push": { "status": "pending" }
+  }
+}
