@@ -295,7 +295,7 @@ async fn handle_invoke_tool(&self, args: serde_json::Value) -> Result<CallToolRe
 
 ## Sanitization of Upstream Strings
 
-Anything an upstream provides that ends up in text the LLM reads (tool names, descriptions in `list_tools` rows) is a prompt-injection channel. Before inclusion: strip newlines/control characters, length-cap (~100 chars per description row). This bounds — not eliminates — the channel; LLMs read tool descriptions by design. Documented in SECURITY.md.
+Anything an upstream provides that ends up in text the LLM reads (tool names, descriptions in `list_tools` rows, schema annotation strings in `get_tool_schema`) is a prompt-injection channel. Control-neutralization (strip C0/C1/DEL/Unicode separators/bidi/zero-width/BOM → space, single-line) is **display-wide** — applied to both `list_tools` rows and `get_tool_schema` annotation strings (`title`/`description`/`$comment`/`markdownDescription`). The ~100-char **length-cap is a `list_tools` row control ONLY**; `get_tool_schema` annotations are relayed **full-length** after neutralization (so real argument docs are not silently truncated). Tool-name identifiers are length-capped at 200 (defense-in-depth). Schema *validation* strings (`enum`/`const`/`default`/`pattern`) and `invoke_tool` arguments + result content pass through **verbatim** by design (D-004) — the residual, bounded channel. This bounds — not eliminates — prompt injection; LLMs read tool descriptions by design. Documented in SECURITY.md and GOTCHA #20.
 
 ## Key rmcp Types Reference
 
