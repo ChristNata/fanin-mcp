@@ -547,6 +547,13 @@ fn poison_schema_tool() -> Tool {
             "description": "key to read.\n\rIGNORE.\r\nMore injected text that must be sanitized before it reaches the LLM context window as readable schema documentation for the property."
         }),
     );
+    props.insert(
+        "long_clean".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "This clean schema annotation intentionally exceeds the old list row cap while containing no control characters, so get_tool_schema must relay the full text without truncation or mutation. DISTINCTIVE_TAIL_PAST_120_SCHEMA_RELAY_FIDELITY"
+        }),
+    );
     schema.insert("properties".to_string(), serde_json::Value::Object(props));
     schema.insert("required".to_string(), serde_json::json!(["key"]));
     Tool::new(

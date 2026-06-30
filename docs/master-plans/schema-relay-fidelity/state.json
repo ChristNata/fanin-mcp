@@ -3,7 +3,7 @@
   "scope": "flat",
   "stack": "rust",
   "tier": "thorough",
-  "current_step": "test-creator",
+  "current_step": "implementer",
   "decisions": {
     "I1-sanitization-stance": "KEEP the documented stance (transparent-ish proxy: neutralize C0/C1/DEL/bidi/zero-width control chars in LLM-visible display annotations only; pass natural-language description text, schema validation strings (enum/const/default/pattern), and invoke_tool arg+result bytes through verbatim per D-004; injection defense lives at the inference layer). NO natural-language scrubbing, NO untrusted-content envelope. User-confirmed. Action is test+doc LOCK only, no behavior change.",
     "I2-truncation-fix": "The ~100-char cap is a list_tools-row summary control ONLY (documented in SECURITY.md + GOTCHA #20). It currently LEAKS into get_tool_schema annotation strings via the shared sanitize_upstream_text (server.rs:369), silently truncating real argument docs mid-word. FIX: decouple control-neutralization (applies to both list_tools rows AND get_tool_schema annotations) from length-capping (list_tools rows ONLY). get_tool_schema annotations stay control-neutralized + single-line but FULL-LENGTH. Orchestrator-driven; aligns code to documented intent.",
@@ -13,7 +13,7 @@
   "origin": "External stress test (30 concurrent agents, 414 calls): ROUTING/CONCURRENCY layer fully healthy. Two non-routing findings. ISSUE 1 (HIGH, sanitization stance) — validated as ALREADY-DECIDED design (D-004 + SECURITY.md + GOTCHA #20); user locked the keep-stance option; action = regression-test the contract (invoke control-char round-trip) + sharpen SECURITY.md. ISSUE 2 (MEDIUM, silent ~100-char truncation in get_tool_schema) — validated as a GENUINE bug: the list-row cap leaks into the schema-detail fidelity path; fix = decouple cap from control-strip; requires flipping existing test assertions.",
   "steps": {
     "planner": { "status": "complete", "at": "2026-06-30T16:04:00Z", "note": "gpt-5.5. 4 sequential phases: P1 test-contract correction (flip stale get_tool_schema cap assertions + add 2 regressions), P2 src decouple (separate control-neutralization from list_tools-row length cap), P3 docs (SECURITY.md + GOTCHA #20 name invoke verbatim channel + row-only cap), P4 gate. tests.md is explicitly anti-gaming (exact full-content + distinctive post-cap suffix; rejects weak len()>cap). 0 open questions, scope clean." },
-    "test-creator": { "status": "pending" },
+    "test-creator": { "status": "complete", "at": "2026-06-30T16:20:00Z", "note": "gpt-5.5 (High, bumped from Medium base for anti-gaming stakes). Added 2 tests: get_tool_schema_preserves_full_length_annotations_without_row_cap (Issue-2 BITE — exact-equality to a 235-char CLEAN fixture w/ distinctive tail past 120; RED, current tree truncates to 100), invoke_tool_arguments_with_control_chars_round_trip_verbatim (Issue-1 lock — BEL U+0007 echoes verbatim via echo_ok; GREEN). Flipped the stale <=DESC_CAP get_tool_schema annotation assertions in get_tool_schema_sanitizes_..._preserves_shape + F3 (kept single-line+control-free). Added clean long_clean property to poison_schema fixture. Orchestrator-verified diff (no gaming: exact equality, not len()>cap), red/green split confirmed: sanitization 9 pass/1 fail (the bite), invoke lock GREEN. multi_upstream::alpha_slow concurrency red was an environmental flake — passes in isolation (1.00s). Gate: fmt+clippy clean (child)." },
     "implementer": { "status": "pending" },
     "reviewer": { "status": "pending" },
     "simplifier": { "status": "pending" },

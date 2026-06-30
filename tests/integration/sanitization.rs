@@ -51,6 +51,12 @@ const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 /// description well over 100 chars is NOT emitted verbatim.
 const DESC_CAP: usize = 120;
 
+/// Long clean schema annotation fixture. Kept in sync with the probe fixture's
+/// `poison_schema.properties.long_clean.description` value. The distinctive
+/// suffix is past `DESC_CAP`, so a reintroduced schema-annotation row cap fails
+/// by exact equality, not by a weak length-only check.
+const LONG_CLEAN_SCHEMA_DESCRIPTION: &str = "This clean schema annotation intentionally exceeds the old list row cap while containing no control characters, so get_tool_schema must relay the full text without truncation or mutation. DISTINCTIVE_TAIL_PAST_120_SCHEMA_RELAY_FIDELITY";
+
 /// Helper: spawn the aggregator with the canonical Phase 1 config + initialize.
 async fn phase1_child() -> common::JsonRpcChild {
     let cfg = fx::ConfigBuilder::new().write();
@@ -319,6 +325,51 @@ async fn invoke_tool_dispatches_on_real_tool_name_not_sanitized_display() {
     child.into_guard().shutdown().await.ok();
 }
 
+/// Master SC 5 / D-004: `invoke_tool` arguments are a byte-faithful channel.
+/// A BEL U+0007 embedded in a string argument must reach the upstream echo path
+/// and return in the tool result unchanged. Sanitization is display-only for
+/// discovery/schema annotations, not invoke arguments or result content.
+#[tokio::test]
+async fn invoke_tool_arguments_with_control_chars_round_trip_verbatim() {
+    let mut child = phase1_child().await;
+
+    let payload = "wei\u{0007}rd";
+    let resp = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            serde_json::json!({
+                "name": "probe__echo_ok",
+                "arguments": { "message": payload },
+            }),
+        ),
+    )
+    .await
+    .expect("invoke_tool probe__echo_ok with BEL-bearing argument must complete");
+    common::assert_no_rpc_error(&resp, "invoke_tool probe__echo_ok BEL round-trip");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("invoke_tool echo_ok returned no result"));
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "invoke_tool echo_ok must be a successful tool result, not isError"
+        );
+    }
+
+    let text = result_text(&result);
+    assert_eq!(
+        text, payload,
+        "invoke_tool must round-trip the BEL-bearing argument verbatim; BEL must not be \
+         replaced, deleted, escaped into a different semantic value, or sanitized"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
 /// Master SC 4: `get_tool_schema` for an upstream tool with poisoned metadata
 /// returns valid JSON and sanitizes the upstream-authored `title` /
 /// `description` / `$comment` strings, while preserving the schema's
@@ -406,19 +457,15 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
 
     // SC 4 metadata sanitization: the upstream-authored `title`,
     // `description`, and `$comment` strings are sanitized (control-free and
-    // capped). A non-sanitizing implementation would pass the poisoned
-    // strings through verbatim.
+    // single-line). A non-sanitizing implementation would pass the poisoned
+    // strings through verbatim. Full schema annotations are NOT row-capped;
+    // only `list_tools` row descriptions use `DESC_CAP`.
     if let Some(title) = schema.get("title").and_then(|t| t.as_str()) {
         assert!(
             !title.contains('\n') && !title.contains('\r'),
             "poison_schema `title` must be a single line (sanitized); got: {title:?}"
         );
         assert_no_control_chars(title, "poison_schema title");
-        assert!(
-            title.chars().count() <= DESC_CAP,
-            "poison_schema `title` must be capped at ~{DESC_CAP} chars; got {}: {title:?}",
-            title.chars().count()
-        );
     }
     if let Some(desc) = schema.get("description").and_then(|d| d.as_str()) {
         assert!(
@@ -426,11 +473,6 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
             "poison_schema `description` must be a single line; got: {desc:?}"
         );
         assert_no_control_chars(desc, "poison_schema description");
-        assert!(
-            desc.chars().count() <= DESC_CAP,
-            "poison_schema `description` must be capped at ~{DESC_CAP} chars; got {}: {desc:?}",
-            desc.chars().count()
-        );
     }
     if let Some(comment) = schema.get("$comment").and_then(|c| c.as_str()) {
         assert!(
@@ -438,12 +480,83 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
             "poison_schema `$comment` must be a single line; got: {comment:?}"
         );
         assert_no_control_chars(comment, "poison_schema $comment");
-        assert!(
-            comment.chars().count() <= DESC_CAP,
-            "poison_schema `$comment` must be capped at ~{DESC_CAP} chars; got {}: {comment:?}",
-            comment.chars().count()
+    }
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC 1: `get_tool_schema` returns full annotation strings. This uses a
+/// clean property description longer than the old `DESC_CAP`, with a distinctive
+/// suffix beyond character 120. Exact equality fails on truncation and on
+/// mid-string mutation.
+#[tokio::test]
+async fn get_tool_schema_preserves_full_length_annotations_without_row_cap() {
+    let mut child = phase1_child().await;
+
+    let resp = timeout(
+        SPAWN_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "get_tool_schema",
+            serde_json::json!({ "name": "probe__poison_schema" }),
+        ),
+    )
+    .await
+    .expect("get_tool_schema probe__poison_schema must complete");
+    common::assert_no_rpc_error(
+        &resp,
+        "get_tool_schema probe__poison_schema long annotation",
+    );
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("get_tool_schema returned no result"));
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "get_tool_schema for a known tool must not be an error"
         );
     }
+
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("get_tool_schema result missing content array"));
+    let text = content
+        .iter()
+        .find_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(String::from)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| panic!("get_tool_schema result must carry a text content block"));
+    let schema: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        panic!("get_tool_schema text content must be valid JSON; got: {text:?}\n{e}")
+    });
+
+    let long_desc = schema
+        .get("properties")
+        .and_then(|p| p.get("long_clean"))
+        .and_then(|p| p.get("description"))
+        .and_then(|d| d.as_str())
+        .unwrap_or_else(|| {
+            panic!("poison_schema must expose properties.long_clean.description; got: {schema:?}")
+        });
+    assert_eq!(
+        long_desc,
+        LONG_CLEAN_SCHEMA_DESCRIPTION,
+        "get_tool_schema must relay the full clean annotation exactly; expected {} chars with \
+         the distinctive tail past {DESC_CAP}, got {} chars: {long_desc:?}",
+        LONG_CLEAN_SCHEMA_DESCRIPTION.chars().count(),
+        long_desc.chars().count()
+    );
+    assert!(
+        long_desc.contains("DISTINCTIVE_TAIL_PAST_120_SCHEMA_RELAY_FIDELITY"),
+        "long annotation must include the distinctive suffix past the old cap; got: {long_desc:?}"
+    );
 
     child.into_guard().shutdown().await.ok();
 }
@@ -941,19 +1054,14 @@ async fn f3_get_tool_schema_preserves_validation_data_sanitizes_only_annotations
 
     // F3 part 2: ANNOTATIONS SANITIZED. The `title` and `description` carry
     // control chars; the aggregator MUST sanitize them (control-free, single
-    // line, capped). This is the annotation-only policy: sanitize labels, not
-    // validation constants.
+    // line). Full schema annotations are NOT row-capped. This is the
+    // annotation-only policy: sanitize labels, not validation constants.
     if let Some(title) = schema.get("title").and_then(|t| t.as_str()) {
         assert!(
             !title.contains('\n') && !title.contains('\r'),
             "F3: poison_validation `title` annotation must be a single line (sanitized); got: {title:?}"
         );
         assert_no_control_chars(title, "poison_validation title (F3)");
-        assert!(
-            title.chars().count() <= DESC_CAP,
-            "F3: poison_validation `title` must be capped at ~{DESC_CAP} chars; got {}: {title:?}",
-            title.chars().count()
-        );
     }
     if let Some(desc) = schema.get("description").and_then(|d| d.as_str()) {
         assert!(
@@ -961,11 +1069,6 @@ async fn f3_get_tool_schema_preserves_validation_data_sanitizes_only_annotations
             "F3: poison_validation `description` annotation must be a single line; got: {desc:?}"
         );
         assert_no_control_chars(desc, "poison_validation description (F3)");
-        assert!(
-            desc.chars().count() <= DESC_CAP,
-            "F3: poison_validation `description` must be capped at ~{DESC_CAP} chars; got {}: {desc:?}",
-            desc.chars().count()
-        );
     }
 
     child.into_guard().shutdown().await.ok();
