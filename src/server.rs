@@ -170,7 +170,8 @@ impl Aggregator {
                     continue; // discovery-time filter: denied tool never emitted
                 }
                 let disp_name = sanitize_upstream_identifier(&tool.name);
-                let disp_desc = sanitize_upstream_text(&tool.description.unwrap_or_default());
+                let disp_desc =
+                    sanitize_list_row_description(&tool.description.unwrap_or_default());
                 rows.push(serde_json::json!({
                     "server": server,
                     "tool": disp_name,
@@ -356,19 +357,24 @@ fn parse_server_tool(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-/// Sanitize upstream-authored display text (descriptions, schema annotation strings)
-/// for LLM-visible display only.
+/// Sanitize upstream-authored display text for LLM-visible display.
 ///
-/// - Replaces C0, C1, DEL, Unicode separators, bidi controls, BOM, and common
-///   zero-width format chars with a single ASCII space.
-/// - The result is always a single logical line free of those code points.
-/// - After stripping, length is capped to ~100 Unicode characters (scalar values),
-///   never splitting a multibyte UTF-8 sequence.
-/// - This is DISPLAY-ONLY. It is never applied to `invoke_tool` arguments or
-///   result content (see D-004 / GOTCHA #4).
-fn sanitize_upstream_text(s: &str) -> String {
-    let stripped: String = s
-        .chars()
+/// Control-neutralization is DISPLAY-WIDE: it applies to both `list_tools` row
+/// descriptions and `get_tool_schema` annotation strings (`title`/`description`/
+/// `$comment`/`markdownDescription`). It replaces C0, C1, DEL, Unicode
+/// separators, bidi controls, BOM, and common zero-width format chars with a
+/// single ASCII space, then trims to a single logical line. It does NOT
+/// length-cap.
+///
+/// The ~100-char length cap is a `list_tools` ROW control ONLY — see
+/// `sanitize_list_row_description`. It does NOT apply to `get_tool_schema`
+/// annotations, which are relayed full-length after neutralization.
+///
+/// This is DISPLAY-ONLY. It is never applied to `invoke_tool` arguments or
+/// result content (see D-004 / GOTCHA #4), nor to schema validation values
+/// (`enum`/`const`/`default`/`pattern`/`examples`).
+fn neutralize_upstream_display(s: &str) -> String {
+    s.chars()
         .map(|c| {
             if should_neutralize_upstream_char(c) {
                 ' '
@@ -376,12 +382,19 @@ fn sanitize_upstream_text(s: &str) -> String {
                 c
             }
         })
-        .collect();
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
 
-    // Trim (cleans boundary controls), then cap at 100 Unicode scalars.
-    // Cap AFTER strip; char iterator never splits multibyte.
+/// Sanitize a `list_tools` row description: control-neutralize, trim to a single
+/// line, then cap at ~100 Unicode scalars (the row summary cap). The cap is a
+/// row control ONLY; `get_tool_schema` annotations use `neutralize_upstream_display`
+/// and are relayed full-length.
+fn sanitize_list_row_description(s: &str) -> String {
     const CAP: usize = 100;
-    stripped.trim().chars().take(CAP).collect()
+    // Cap AFTER strip; char iterator never splits multibyte.
+    neutralize_upstream_display(s).chars().take(CAP).collect()
 }
 
 /// Sanitize an upstream identifier for LLM-visible row keys without changing
@@ -457,7 +470,7 @@ fn is_schema_metadata_key(k: &str) -> bool {
 
 fn sanitize_metadata_value(v: &serde_json::Value) -> serde_json::Value {
     match v {
-        serde_json::Value::String(s) => serde_json::Value::String(sanitize_upstream_text(s)),
+        serde_json::Value::String(s) => serde_json::Value::String(neutralize_upstream_display(s)),
         other => sanitize_schema_metadata(other),
     }
 }
