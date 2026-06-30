@@ -12,6 +12,9 @@
 .idea/
 .vscode/
 
+# Plans
+docs/master-plans
+
 # Obsidian vault — ignore volatile workspace/cache, keep shared notes + settings
 docs/.obsidian/workspace*.json
 docs/.obsidian/cache

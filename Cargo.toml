@@ -11,6 +11,16 @@ readme = "README.md"
 keywords = ["mcp", "proxy", "llm", "stdio", "aggregator"]
 categories = ["command-line-utilities", "development-tools"]
 publish = true
+exclude = [
+    "docs/",
+    ".claude/",
+    ".opencode/",
+    ".github/",
+    "CLAUDE.md",
+    "opencode.json",
+    ".mcp.json",
+    "deny.toml",
+]
 
 # Auto-discovery is disabled so the two binary targets and the single
 # integration test target are fully explicit. Without this, cargo would
@@ -22,6 +32,9 @@ publish = true
 # one declared `[[test]]` below.
 autobins = false
 autotests = false
+
+[features]
+probe-fixture = []
 
 [dependencies]
 # rmcp — the official MCP Rust SDK, server and client roles in one process.
@@ -138,6 +151,7 @@ path = "src/main.rs"
 [[bin]]
 name = "probe-server"
 path = "tests/probe-server/main.rs"
+required-features = ["probe-fixture"]   # non-default → cargo install skips it
 
 [[test]]
 name = "integration"

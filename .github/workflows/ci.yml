@@ -64,7 +64,7 @@ jobs:
       # to the project's lint baseline rather than churning shipped code (incl. the
       # OC-edit-restricted credentials.rs). Re-enable after a deliberate modernize pass.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings -A clippy::uninlined_format_args
+        run: cargo clippy --all-targets --features probe-fixture -- -D warnings -A clippy::uninlined_format_args
 
       # Token benchmark runs BEFORE integration tests: it writes
       # target/token-figures.generated.md, which token_figures.rs asserts the
@@ -73,7 +73,7 @@ jobs:
         run: cargo bench --bench token_cost
 
       - name: Integration tests
-        run: cargo test --test integration
+        run: cargo test --test integration --features probe-fixture
 
       - name: Build release
         run: cargo build --release
