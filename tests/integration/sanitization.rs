@@ -145,6 +145,19 @@ fn assert_no_control_chars(s: &str, ctx: &str) {
     }
 }
 
+/// Assert a string is free of the broad display-forbidden set shared with the
+/// F1 row-text proof: C1 controls, Unicode line/paragraph separators, bidi
+/// controls, zero-width format chars, and BOM. This catches a regression where
+/// `get_tool_schema` annotations fall back to a C0-only strip.
+fn assert_no_f1_forbidden_codepoints(s: &str, ctx: &str) {
+    for cp in F1_FORBIDDEN_CODEPOINTS {
+        assert!(
+            !s.chars().any(|c| c as u32 == cp),
+            "{ctx}: string must NOT contain U+{cp:04X} (Unicode separator / C1 / bidi / zero-width / BOM); got: {s:?}"
+        );
+    }
+}
+
 /// Master SC 1 + SC 2 + SC 3: `list_tools` returns a sanitized row for the
 /// probe's `poison_meta` tool. The probe's description contains embedded
 /// `\n`, `\r`, tab, vertical tab, form feed, and well over 100 visible
@@ -466,6 +479,7 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
             "poison_schema `title` must be a single line (sanitized); got: {title:?}"
         );
         assert_no_control_chars(title, "poison_schema title");
+        assert_no_f1_forbidden_codepoints(title, "poison_schema title");
     }
     if let Some(desc) = schema.get("description").and_then(|d| d.as_str()) {
         assert!(
@@ -473,6 +487,7 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
             "poison_schema `description` must be a single line; got: {desc:?}"
         );
         assert_no_control_chars(desc, "poison_schema description");
+        assert_no_f1_forbidden_codepoints(desc, "poison_schema description");
     }
     if let Some(comment) = schema.get("$comment").and_then(|c| c.as_str()) {
         assert!(
@@ -480,6 +495,7 @@ async fn get_tool_schema_sanitizes_poisoned_metadata_preserves_shape() {
             "poison_schema `$comment` must be a single line; got: {comment:?}"
         );
         assert_no_control_chars(comment, "poison_schema $comment");
+        assert_no_f1_forbidden_codepoints(comment, "poison_schema $comment");
     }
 
     child.into_guard().shutdown().await.ok();

@@ -524,7 +524,7 @@ fn poison_schema_tool() -> Tool {
     schema.insert(
         "title".to_string(),
         serde_json::Value::String(
-            "Poisoned\n\rTitle\twith\u{000B}control\u{000C}chars and a long suffix that goes well past one hundred visible characters to exercise the length cap on schema metadata strings too.".into(),
+            "\u{2028}Uni\u{2029}sep\u{0085}NEL\u{0080}pad\u{202E}RLO\u{200B}ZWSP\u{FEFF}BOM Poisoned\n\rTitle\twith\u{000B}control\u{000C}chars and a long suffix that goes well past one hundred visible characters to exercise the length cap on schema metadata strings too.".into(),
         ),
     );
     schema.insert(
