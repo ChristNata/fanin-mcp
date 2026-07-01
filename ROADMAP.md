@@ -56,6 +56,6 @@ These define what fanin-mcp *is* by what it refuses to become. Revisiting any of
 
 ## Release practice
 
-- Distributed three ways: **npm** (`npm install -g fanin-mcp`), **crates.io** (`cargo install fanin-mcp`), and **tagged GitHub Releases** with signed, checksummed `.zip`/`.tar.gz` archives for Windows/macOS/Linux.
+- Published to **crates.io** (`cargo install fanin-mcp`); source distributed via tagged **GitHub Releases** (auto-generated source `.zip`/`.tar.gz`) for `cargo build --release`. No prebuilt binaries shipped.
 - SemVer. The 3-meta-tool surface and the structured-error JSON shape are the public API — breaking either bumps major.
 - README performance/token claims are regenerated from the in-repo benchmark per release, never hand-edited.
