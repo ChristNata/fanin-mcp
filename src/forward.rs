@@ -154,7 +154,7 @@ impl ClientHandler for UpstreamClientHandler {
         // `notifications/cancelled` to the downstream client on timeout, so
         // the pending prompt is NOT left dangling.
         let peer_opt = self.downstream_elicitation_available();
-        tracing::info!(
+        tracing::debug!(
             server = %self.server,
             peer_cell_set = self.downstream_peer.get().is_some(),
             elicitation_available = peer_opt.is_some(),
@@ -181,7 +181,7 @@ impl ClientHandler for UpstreamClientHandler {
                         "forwarded elicitation failed (non-accept default-deny)"
                     );
                     Err(McpError::invalid_request(
-                        "fanin-mcp forwarded elicitation did not produce an accept outcome",
+                        "fanin-mcp forwarded elicitation resolved to non-accept",
                         Some(json!({
                             "server": self.server,
                             "code": "elicitation_non_accept",
