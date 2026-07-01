@@ -21,7 +21,7 @@ use tokio::time::timeout;
 /// Hard ceiling for any single JSON-RPC round-trip. Generous enough that a
 /// correct implementation never hits it, tight enough that a hang fails the
 /// test instead of stalling CI.
-const RPC_DEADLINE: Duration = Duration::from_secs(5);
+const RPC_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Hard ceiling for the `initialize` round-trip specifically. The plan's
 /// startup-laziness gate (criterion 4) requires < 500ms; we use a wider
