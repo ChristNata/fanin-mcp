@@ -42,8 +42,9 @@ Creds duplicated per project/CLI        Creds once, in the OS keychain
 
 ### Install
 
+- npm: `npm install -g fanin-mcp`
 - Rust users: `cargo install fanin-mcp`
-- Everyone else: download the latest prebuilt binary from GitHub Releases.
+- Prebuilt archives: download the `.zip` (Windows) or `.tar.gz` (macOS/Linux) for your platform from the tagged [GitHub Releases](https://github.com/ChristNata/fanin-mcp/releases).
 
 ```bash
 # Build
