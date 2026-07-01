@@ -20,10 +20,11 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::time::timeout;
 
 use crate::common;
+use crate::common::elicit as el;
 use crate::common::expectations as exp;
 use crate::common::fixtures as fx;
 
@@ -641,5 +642,267 @@ async fn multi_upstream_preserves_phase0_phase1_guarantees() {
         .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
     exp::assert_exact_meta_tools(final_tools);
 
+    child.into_guard().shutdown().await.ok();
+}
+
+// ---- Elicitation concurrency (v1.1 / Phase 4) -----------------------------
+//
+// Two-upstream concurrency proofs for the elicitation-forwarding slice. The
+// downstream test client DECLARES elicitation capability and answers
+// `elicitation/create` requests from BOTH upstreams over the same stdio
+// stream. The probe's `needs_elicitation` tool encodes the outcome it received
+// per call, so the tests assert the DIRECT outcome per upstream (SC11 distinct
+// outcomes, no cross-talk) and that a slow prompt on one upstream does not
+// block a sibling (SC12).
+//
+// The peer cell is reusable shared state, NOT a single-slot current-elicitation
+// holder (GP-9). A stub that stores a single current-elicitation future would
+// cross-talk the two concurrent prompts and fail SC11.
+
+/// Deadline for a concurrent elicitation round-trip across two upstreams.
+const CONCURRENT_ELICIT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Master SC11 / GP-9: two upstreams issue CONCURRENT elicitation requests and
+/// receive their DISTINCT downstream outcomes with no cross-talk. Alpha is
+/// answered ACCEPT (with content "alpha-yes") and beta is answered DECLINE —
+/// the two outcomes must not be swapped or collapsed. The test asserts the
+/// DIRECT outcome per upstream via the probe's encoded
+/// `elicitation_action`/`non_accept` fields.
+///
+/// A stub that stores a single current-elicitation future (a single-slot
+/// holder rather than the reusable peer handle) would cross-talk: alpha might
+/// receive beta's decline, or beta alpha's accept. The distinct-outcome
+/// assertion catches that directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_elicitations_on_two_upstreams_resolve_distinct_no_crosstalk() {
+    let cfg = alpha_beta_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+
+    // Issue both needs_elicitation calls WITHOUT awaiting — both enter the
+    // registry, spawn their upstream, and the probes each emit a forwarded
+    // elicitation/create toward this downstream client.
+    let alpha_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "alpha__needs_elicitation",
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    let beta_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "beta__needs_elicitation",
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+
+    // Two forwarded elicitation/create requests arrive on the wire. Read them
+    // both and answer each by id. The order of arrival is not guaranteed, so
+    // match each request to its tool call by inspecting the params (the probe
+    // sends the same message text; we answer by id and assert the outcome
+    // matches the answer we sent for that id). To keep the cross-talk
+    // assertion tight, we answer the FIRST arriving request with ACCEPT
+    // (content "alpha-yes") and the SECOND with DECLINE, then assert the
+    // probe whose tool call resolves with ACCEPT is the one whose forwarded
+    // request we answered with ACCEPT — i.e., we correlate by id, not by
+    // upstream name.
+    let req_a = el::await_elicitation_request(&mut child).await;
+    let id_a = req_a
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("first forwarded elicitation missing id: {req_a:?}"));
+    let req_b = el::await_elicitation_request(&mut child).await;
+    let id_b = req_b
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("second forwarded elicitation missing id: {req_b:?}"));
+
+    // Answer the first request ACCEPT, the second DECLINE.
+    el::answer_accept(&mut child, id_a, json!({ "answer": "alpha-yes" })).await;
+    el::answer_decline(&mut child, id_b).await;
+
+    // Both tool calls must resolve within the deadline (no hang, no lost
+    // request). The responses may arrive in either order.
+    let resp_a = timeout(CONCURRENT_ELICIT_DEADLINE, child.wait_for_id(alpha_id))
+        .await
+        .expect("alpha__needs_elicitation must resolve (no hang)");
+    let resp_b = timeout(CONCURRENT_ELICIT_DEADLINE, child.wait_for_id(beta_id))
+        .await
+        .expect("beta__needs_elicitation must resolve (no hang)");
+    common::assert_no_rpc_error(&resp_a, "alpha__needs_elicitation concurrent");
+    common::assert_no_rpc_error(&resp_b, "beta__needs_elicitation concurrent");
+
+    // The mapping from forwarded-elicitation id to tool-call id is not
+    // directly observable (rmcp owns id correlation on both hops). What IS
+    // observable: exactly one tool call resolves ACCEPT and exactly one
+    // resolves DECLINE — the two distinct outcomes we sent. Cross-talk would
+    // collapse them (both accept, both decline, or swapped-and-mismatched).
+    let result_a = resp_a
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("alpha__needs_elicitation returned no result"));
+    let result_b = resp_b
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("beta__needs_elicitation returned no result"));
+    let outcome_a = el::parse_elicitation_outcome(&result_a, "SC11 alpha outcome");
+    let outcome_b = el::parse_elicitation_outcome(&result_b, "SC11 beta outcome");
+
+    // Collect the two actions; they must be {accept, decline} as a set.
+    let mut actions: Vec<String> = [(&outcome_a, "a"), (&outcome_b, "b")]
+        .iter()
+        .map(|(o, label)| {
+            o.get("elicitation_action")
+                .and_then(|a| a.as_str())
+                .unwrap_or_else(|| panic!("SC11 outcome {label} missing action: {o:?}"))
+                .to_string()
+        })
+        .collect();
+    actions.sort();
+    assert_eq!(
+        actions,
+        vec!["accept".to_string(), "decline".to_string()],
+        "SC11 / GP-9: the two concurrent elicitations must resolve to DISTINCT \
+         outcomes (accept + decline); got {actions:?} — cross-talk would collapse or \
+         swap them. outcomes: a={outcome_a:?} b={outcome_b:?}"
+    );
+
+    // The accept outcome's content must round-trip byte-faithfully (D-004).
+    let (accept_outcome, _decline_outcome) =
+        if outcome_a.get("elicitation_action").and_then(|a| a.as_str()) == Some("accept") {
+            (&outcome_a, &outcome_b)
+        } else {
+            (&outcome_b, &outcome_a)
+        };
+    let content = el::accept_content(accept_outcome);
+    assert_eq!(
+        content.get("answer").and_then(|a| a.as_str()),
+        Some("alpha-yes"),
+        "SC11: the accept content must round-trip byte-faithfully; got {content:?}"
+    );
+
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC12 / GP-9: a pending (slow / never-answered) elicitation on one
+/// upstream does NOT block a concurrent fast tool call on a sibling upstream.
+/// Alpha's `needs_elicitation` is answered slowly (we leave it pending), while
+/// beta's `echo_ok` completes within a deadline strictly shorter than the
+/// pending alpha elicitation. A stub that holds a single registry-level lock
+/// across the downstream elicitation await would serialize the session: beta's
+/// echo would block until alpha's elicitation resolved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_elicitation_on_one_upstream_does_not_block_sibling() {
+    let cfg = alpha_beta_config();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+
+    // Issue alpha's needs_elicitation WITHOUT awaiting — it enters the
+    // registry, spawns alpha, and awaits the forwarded elicitation (which we
+    // leave pending). `alpha_call_id` is the downstream tools/call id; the
+    // forwarded elicitation/create has its OWN id (read below).
+    let alpha_call_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "alpha__needs_elicitation",
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    // Await the forwarded elicitation/create request so we KNOW alpha is
+    // blocked on the downstream answer. RETAIN the forwarded request id — we
+    // answer it after the beta assertion so alpha resolves promptly and the
+    // cleanup drain is deterministic (the proxy's default 60s tool-call timeout
+    // is far longer than the harness `read_line` RPC_DEADLINE, so leaving
+    // alpha to time out on the proxy side would panic the drain read instead
+    // of cleanly elapsing). Do NOT answer it yet — alpha must stay pending
+    // through the load-bearing beta assertion below.
+    let alpha_elicit_req = el::await_elicitation_request(&mut child).await;
+    let alpha_elicit_req_id = alpha_elicit_req
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            panic!("alpha forwarded elicitation/create missing id: {alpha_elicit_req:?}")
+        });
+
+    // Immediately issue beta's echo_ok. If the proxy held a registry lock
+    // across alpha's elicitation await, this would block until alpha resolved.
+    // A correct lock-discipline impl dispatches beta on a SEPARATE upstream
+    // while alpha's elicitation await is pending.
+    let beta_echo_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "beta__echo_ok",
+                    "arguments": { "message": "concurrent-with-pending-elicitation" },
+                },
+            }),
+        )
+        .await;
+
+    // The load-bearing assertion: beta echo completes within a deadline
+    // strictly shorter than the pending alpha elicitation (which we leave
+    // unanswered THROUGH this assertion, then answer it below for cleanup). 5s
+    // is comfortable for a real forward and still well under the pending alpha
+    // call.
+    let beta_resp = timeout(Duration::from_secs(5), child.wait_for_id(beta_echo_id))
+        .await
+        .expect(
+            "beta__echo_ok must complete within 5s while alpha__needs_elicitation is \
+             pending — a registry lock held across the elicitation await would serialize \
+             the session and make this timeout (SC12 / D-007 / GOTCHA #16)",
+        );
+    common::assert_no_rpc_error(&beta_resp, "beta__echo_ok during pending alpha elicitation");
+    let beta_result = beta_resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("beta__echo_ok returned no result"));
+    if let Some(is_error) = beta_result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "beta__echo_ok must succeed (real forward, not an error) while alpha's \
+             elicitation is pending"
+        );
+    }
+    let beta_text = result_text(&beta_result);
+    assert!(
+        beta_text.contains("concurrent-with-pending-elicitation"),
+        "SC12: beta__echo_ok must echo byte-faithfully while alpha's elicitation is \
+         pending; got: {beta_text:?}"
+    );
+
+    // Answer alpha's pending elicitation with DECLINE so it resolves promptly
+    // and the cleanup drain is deterministic. We retained the forwarded request
+    // id above (binding it, not dropping it) precisely so we can answer it
+    // here. Leaving alpha to resolve via the proxy's default 60s tool-call
+    // timeout would outlast the harness `read_line` RPC_DEADLINE (5s) and
+    // panic the drain read — that was the original harness read bug, not a
+    // lock. Answering here makes alpha's tool result arrive within
+    // `read_line`'s budget; the outer ceiling still catches a hang.
+    el::answer_decline(&mut child, alpha_elicit_req_id).await;
+    let _ = timeout(Duration::from_secs(5), child.wait_for_id(alpha_call_id))
+        .await
+        .expect(
+            "alpha__needs_elicitation must resolve after we answer its forwarded elicitation — \
+             a hang here would mean the proxy did not relay the decline upstream (SC12 cleanup)",
+        );
     child.into_guard().shutdown().await.ok();
 }

@@ -7,18 +7,18 @@ use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
-use rmcp::service::{RunningService, ServiceError};
+use rmcp::service::{Peer, RunningService, ServiceError};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{RoleClient, RoleServer, ServiceExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 
 use crate::config::{ServerConfig, TomlConfig};
 use crate::credentials::CredentialStoreChoice;
 use crate::error::ToolError;
-use crate::forward::UpstreamClientHandler;
+use crate::forward::{DownstreamPeerCell, UpstreamClientHandler};
 
 /// Running upstream service type.
 pub type UpstreamService = RunningService<RoleClient, UpstreamClientHandler>;
@@ -61,22 +61,49 @@ pub struct Registry {
     credential_choice: CredentialStoreChoice,
     entries: RwLock<HashMap<String, Arc<UpstreamEntry>>>,
     init_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Shared downstream peer cell — the single source of truth for downstream
+    /// elicitation capability (D-008 / GP-1). Captured once in `main.rs` after
+    /// the downstream initialize handshake; threaded to every
+    /// `UpstreamClientHandler` so the forwarding gate and capability
+    /// advertisement are the SAME condition (GP-1). Self-contained `Arc` — no
+    /// registry map lock is held to inspect it (D-007 / GOTCHA #16).
+    downstream_peer: DownstreamPeerCell,
 }
 
 impl Registry {
     /// Creates a registry from a validated config and the chosen credential backend.
-    pub fn new(config: TomlConfig, credential_choice: CredentialStoreChoice) -> Self {
+    ///
+    /// `downstream_peer` is the shared cell captured in `main.rs` after the
+    /// downstream `serve(stdio())` completes initialize (the peer race is
+    /// structurally dead — DELTA-3). Threaded to every upstream handler.
+    pub fn new(
+        config: TomlConfig,
+        credential_choice: CredentialStoreChoice,
+        downstream_peer: DownstreamPeerCell,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             credential_choice,
             entries: RwLock::new(HashMap::new()),
             init_guards: Mutex::new(HashMap::new()),
+            downstream_peer,
         }
     }
 
     /// Returns true if the server exists in the config.
     pub fn has_server(&self, server: &str) -> bool {
         self.config.servers.contains_key(server)
+    }
+
+    /// Populate the shared downstream peer cell after the downstream initialize
+    /// handshake completes. Called once from `main.rs` after
+    /// `aggregator.serve(stdio())` returns `running`. The `OnceLock` means the
+    /// first (and only) set wins; a redundant call is a harmless no-op. The
+    /// `Peer<RoleServer>` is `Clone` (rmcp derives `Clone` on `Peer`); a clone
+    /// is stored so the cell is self-contained and reusable across concurrent
+    /// upstream forwards (GP-9). No registry map lock is held.
+    pub fn set_downstream_peer(&self, peer: Peer<RoleServer>) -> Result<(), Peer<RoleServer>> {
+        self.downstream_peer.set(peer)
     }
 
     /// Returns a cached/lazy upstream connection.
@@ -152,6 +179,8 @@ impl Registry {
             &resolved_env,
             &resolved_headers,
             resolved_cwd.as_deref(),
+            self.downstream_peer.clone(),
+            effective,
         );
         let entry = Arc::new(match timeout(effective, connect_future).await {
             Ok(result) => result?,
@@ -392,6 +421,8 @@ async fn connect(
     resolved_env: &std::collections::HashMap<String, String>,
     resolved_headers: &std::collections::HashMap<String, String>,
     resolved_cwd: Option<&str>,
+    downstream_peer: DownstreamPeerCell,
+    effective_timeout: Duration,
 ) -> Result<UpstreamEntry, ToolError> {
     let log_file = config.log_file.as_ref().map(std::path::PathBuf::from);
     tracing::info!(
@@ -410,7 +441,13 @@ async fn connect(
     // Handler gets a clone; the entry will store the same Arc.
     // No registry map lock is involved here; this is purely local to the entry.
     let dirty = Arc::new(AtomicBool::new(false));
-    let handler = UpstreamClientHandler::new(server, log_file, dirty.clone());
+    let handler = UpstreamClientHandler::new(
+        server,
+        log_file,
+        dirty.clone(),
+        downstream_peer,
+        effective_timeout,
+    );
     let service = match config.transport_kind() {
         "stdio" => {
             let spawned = crate::process::spawn_stdio_transport(

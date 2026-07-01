@@ -199,38 +199,45 @@ let transport = StreamableHttpClientTransport::new("https://mcp.context7.com/mcp
 
 SSE transport is deprecated by the spec; prefer Streamable HTTP.
 
-## Bidirectional Traffic: Upstream-Originated Requests (MVP: clean reject)
+## Bidirectional Traffic: Upstream-Originated Requests
 
 MCP upstreams send requests **to their client** — which is the aggregator: `sampling/createMessage`, `elicitation/create`, `roots/list`, plus `notifications/message` (logging) and progress notifications. **An unanswered request hangs the upstream forever** and surfaces to you as a mysterious tool-call timeout. Handle from the first upstream connection (Phase 1), not in polish.
 
-**MVP design — clean reject:**
-1. Declare **no** sampling/elicitation capabilities in the aggregator's client info when connecting upstreams — spec-compliant servers then never send those requests at all.
-2. Reject any that arrive anyway with an immediate structured error; answer `roots/list` with an empty list; route logging notifications to the log file; tolerate progress notifications.
-3. Documented limitation: upstreams that *require* sampling/elicitation are unsupported until v1.1.
+**Current state (v1.1.0):**
+- **Elicitation (`elicitation/create`) — SHIPPED, capability-gated.** When the downstream client declared elicitation capability, the raw `CreateElicitationRequestParams` are forwarded downstream via `create_elicitiation_with_timeout(effective)` and the `CreateElicitationResult` (accept/decline/cancel) is relayed back upstream **verbatim** (D-004). The forwarded elicitation **inherits the enclosing tool-call deadline** (per-server `timeout_secs`, D-012); on timeout/disconnect/drop/malformed/cancel/no-capability the outcome is **default-deny non-accept, never accept** (GP-3 — elicitation gates elevation). rmcp sends `notifications/cancelled` to the client on timeout so no prompt dangles. See D-020.
+- **Sampling (`create_message`) — still rejected.** Forwarding remains deferred (planned for a later v1.1 slice).
+- **Roots (`roots/list`) — still empty.** Always returns an empty list; forwarding remains deferred.
+- **Logging / progress / `list_changed` notifications** — handled as in MVP: routed to the log file / tolerated / cache-invalidated.
 
-**v1.1 design — capability mirroring (reference for later):** record the downstream client's capabilities at `initialize`, declare the same to upstreams, forward declared-capability requests downstream and relay the response back. The reject arm below stays as the fallback; the forwarding arm slots in beside it:
+**Peer-capture mechanism (v1.1.0):** the downstream `Peer<RoleServer>` is captured post-`serve()` into an `Arc<OnceLock<Peer<RoleServer>>>` and threaded main -> Registry -> `connect()` -> `UpstreamClientHandler`. Single source of truth for "is this client elicitation-capable?": `peer.peer_info().capabilities.elicitation`. The upstream handler's `get_info()` advertises elicitation **iff** the client declared it (capability honesty, GOTCHA #8).
 
 ```rust
 // Pseudocode — exact handler method names vary by rmcp version; verify against the pin.
 impl ClientHandler for UpstreamClientHandler {
-    async fn create_message(&self, params: CreateMessageRequestParams, _ctx: ...)
-        -> Result<CreateMessageResult, ErrorData>
+    async fn create_elicitation(&self, params: CreateElicitationRequestParams, _ctx: ...)
+        -> Result<CreateElicitationResult, ErrorData>
     {
         match &self.downstream {
-            Some(peer) if self.client_caps.sampling => {
-                // rmcp correlates requests per-connection — just await and relay.
-                peer.create_message(params).await
+            Some(peer) if peer.peer_info().capabilities.elicitation.is_some() => {
+                // Forward raw params; relay result verbatim (D-004). Bounded by the
+                // enclosing tool-call deadline; default-deny on any failure (D-020).
+                peer.create_elicitation_with_timeout(params, effective).await
             }
             _ => Err(ErrorData::new(/* clean structured rejection */
-                "client does not support sampling; tool cannot be served through this proxy")),
+                "client does not support elicitation; tool cannot be served through this proxy")),
         }
     }
 
+    async fn create_message(&self, _params: CreateMessageRequestParams, _ctx: ...)
+        -> Result<CreateMessageResult, ErrorData>
+    {
+        // Sampling forwarding deferred — reject (D-008).
+        Err(ErrorData::new("sampling forwarding not yet supported"))
+    }
+
     async fn list_roots(&self, _ctx: ...) -> Result<ListRootsResult, ErrorData> {
-        match &self.downstream {
-            Some(peer) if self.client_caps.roots => peer.list_roots().await,
-            _ => Ok(ListRootsResult { roots: vec![] }),   // empty, never hang
-        }
+        // Roots forwarding deferred — empty, never hang (D-008).
+        Ok(ListRootsResult { roots: vec![] })
     }
 
     async fn on_logging_message(&self, msg: ..., _ctx: ...) {
@@ -240,11 +247,11 @@ impl ClientHandler for UpstreamClientHandler {
     async fn on_tool_list_changed(&self, _ctx: NotificationContext<RoleClient>) {
         let _ = self.tool_change_tx.send(self.server_name.clone()).await;      // invalidate cache
     }
-    // Accept progress notifications without crashing; forwarding is v1.1.
+    // Accept progress notifications without crashing.
 }
 ```
 
-MVP consequence: the `peer.create_message(...)` forwarding branch is v1.1 — in MVP every sampling/elicitation request takes the rejection branch, and `roots/list` always returns empty. Either way, no request goes unanswered.
+Either way — forwarded or rejected — no request goes unanswered.
 
 ### Sending notifications to the client
 
@@ -317,7 +324,7 @@ Anything an upstream provides that ends up in text the LLM reads (tool names, de
 1. **stdout is the protocol.** All logging to stderr/file after `serve(stdio())`.
 2. **Windows npm = `cmd /c` = orphan risk.** Job Objects are mandatory, not optional.
 3. **`RunningService` is not `Clone`.** Store `Arc<RunningService>`; lock maps briefly, never across calls (see Registry).
-4. **Capability negotiation gates everything** — both directions: declare `tools` downstream or clients never call you; declare **no** sampling/elicitation upstream (MVP) so servers don't send requests you won't serve.
+4. **Capability negotiation gates everything** — both directions: declare `tools` downstream or clients never call you; declare **no** sampling upstream so servers don't send requests you won't serve (elicitation **is** forwarded iff the client declared it — D-020); sampling/roots remain rejected/empty.
 5. **Unanswered upstream requests hang silently.** Wire the `ClientHandler` dispatch before connecting any real server.
 6. **`ErrorData` vs `is_error`.** Protocol errors vs tool errors — keep tool errors in the conversation.
 7. **rmcp drift.** Exact pin, committed lockfile, snippets-are-pseudocode.

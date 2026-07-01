@@ -16,12 +16,13 @@ mod server;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::filter::LevelFilter;
 
-use rmcp::ServiceExt;
+use rmcp::service::Peer;
+use rmcp::{RoleServer, ServiceExt};
 
 use crate::config::CliConfig;
 use crate::namespace::ActiveNamespace;
@@ -246,17 +247,31 @@ async fn run_serve(config: CliConfig) -> ExitCode {
         None
     };
 
-    let aggregator = if let Some(loaded) = loaded {
+    let (aggregator, registry) = if let Some(loaded) = loaded {
         let namespace = ActiveNamespace::new(&loaded, &config.namespace);
         tracing::info!(namespace = namespace.name(), "active namespace selected");
         tracing::debug!(
             namespace = namespace.name(),
             "active namespace selected debug"
         );
-        let registry = Arc::new(Registry::new(loaded, config.credential_store));
-        Aggregator::with_registry(registry, namespace)
+        // Create the shared downstream peer cell BEFORE `Registry::new` so it
+        // threads through `Registry` → `connect()` → `UpstreamClientHandler`
+        // as a self-contained `Arc` (D-007 / GOTCHA #16). The cell is
+        // populated AFTER `serve(stdio())` completes the downstream initialize
+        // handshake (DELTA-3: the peer race is structurally dead — `serve()`
+        // populates `peer_info()` before returning `running`). Reading the
+        // cell at forward time is the single source of truth for downstream
+        // elicitation capability (GP-1 / GOTCHA #8).
+        let downstream_peer: Arc<OnceLock<Peer<RoleServer>>> = Arc::new(OnceLock::new());
+        let registry = Arc::new(Registry::new(
+            loaded,
+            config.credential_store,
+            downstream_peer.clone(),
+        ));
+        let aggregator = Aggregator::with_registry(registry.clone(), namespace);
+        (aggregator, Some(registry))
     } else {
-        Aggregator::new()
+        (Aggregator::new(), None)
     };
 
     // `stdio()` returns `(tokio::io::Stdin, tokio::io::Stdout)`. Once the serve
@@ -270,6 +285,19 @@ async fn run_serve(config: CliConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // Capture the downstream client peer into the shared cell now that the
+    // initialize handshake is complete. Upstreams spawn lazily on first
+    // `invoke_tool`, which is itself a downstream request arriving AFTER this
+    // point — so the cell is populated before any upstream can read it
+    // (DELTA-3). A clone of the `Peer<RoleServer>` (rmcp `Peer` is `Clone`)
+    // is stored; the cell is `OnceLock` so the first (and only) set wins.
+    // The `Peer` handle is reusable — two upstreams may forward concurrently
+    // (GP-9). This is NOT a single-slot current-elicitation holder; rmcp owns
+    // id correlation on both hops.
+    if let Some(registry) = registry {
+        let _ = registry.set_downstream_peer(running.peer().clone());
+    }
 
     if let Err(e) = running.waiting().await {
         tracing::error!(error = %e, "stdio MCP server task failed");

@@ -70,6 +70,39 @@ impl ChildGuard {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
     }
+
+    /// Wait up to `deadline` for the child to exit ON ITS OWN — no stdin EOF
+    /// is sent and no kill is issued unless the deadline lapses. Returns the
+    /// exit status if the child exited within the deadline, or `None` (after a
+    /// force-kill) if it hung past the deadline.
+    ///
+    /// Used by the disconnect-mid-prompt elicitation test (SC9 / GP-4): the
+    /// test closes the downstream stdin to simulate a client disconnect, then
+    /// asserts the proxy process EXITS within the deadline. A hung forward-await
+    /// (the upstream handler blocked on the dropped elicitation response) would
+    /// keep the process alive past the deadline — the no-hang property is
+    /// observable as a clean exit, NOT as a readable stdout line (closing the
+    /// client stdin sends the proxy EOF on its own stdin, so the proxy exits and
+    /// its stdout closes; `wait_for_id` cannot read the response after a
+    /// disconnect).
+    pub async fn wait_for_exit_within(
+        mut self,
+        deadline: Duration,
+    ) -> Option<std::process::ExitStatus> {
+        match timeout(deadline, self.child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(_)) => {
+                let _ = self.child.kill().await;
+                let _ = self.child.wait().await;
+                None
+            }
+            Err(_) => {
+                let _ = self.child.kill().await;
+                let _ = self.child.wait().await;
+                None
+            }
+        }
+    }
 }
 
 impl Drop for ChildGuard {
@@ -82,7 +115,7 @@ impl Drop for ChildGuard {
 /// A live JSON-RPC connection over a spawned child's stdio.
 pub struct JsonRpcChild {
     child: ChildGuard,
-    stdin: tokio::process::ChildStdin,
+    stdin: Option<tokio::process::ChildStdin>,
     stdout: BufReader<tokio::process::ChildStdout>,
     next_id: u64,
     _stderr: Option<tokio::process::ChildStderr>,
@@ -234,15 +267,47 @@ impl JsonRpcChild {
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.write_u8(b'\n').await?;
-        self.stdin.flush().await?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.write_u8(b'\n').await?;
+        stdin.flush().await?;
         Ok(())
     }
 
     /// Hand back the guard so a test can shut the child down explicitly.
     pub fn into_guard(self) -> ChildGuard {
         self.child
+    }
+
+    /// Buffer a response received out-of-order for a later `wait_for_id(id)`.
+    /// Used by elicitation-harness helpers that scan the wire for an upstream
+    /// `elicitation/create` request while other in-flight tool-call responses
+    /// arrive: those responses are retained here so a later `wait_for_id` still
+    /// resolves. This is the public mirror of the private buffering inside
+    /// `wait_for_id`.
+    pub fn buffer_response(&mut self, id: u64, msg: Value) {
+        self.pending.insert(id, msg);
+    }
+
+    /// Write a raw JSON-RPC line to the child's stdin without awaiting any
+    /// response. Used by the elicitation harness to send a downstream client
+    /// response (accept / decline / cancel / error) to a forwarded
+    /// `elicitation/create` request by id. The caller is responsible for the
+    /// wire shape; this helper only frames the line.
+    pub async fn send_raw(&mut self, line: &str) -> std::io::Result<()> {
+        self.write_line(line).await
+    }
+
+    /// Disconnect the downstream client: close stdin (EOF). The proxy's stdio
+    /// transport observes the peer-close and the forwarded elicitation await
+    /// terminates with a peer error. The child's stdout remains readable so
+    /// the probe's tool result can still be observed.
+    pub async fn close_stdin(&mut self) {
+        // Drop the stdin handle => EOF on the next read of the child's stdin.
+        self.stdin = None;
     }
 }
 
@@ -281,7 +346,7 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
 
     JsonRpcChild {
         child: ChildGuard { child },
-        stdin,
+        stdin: Some(stdin),
         stdout: BufReader::new(stdout),
         next_id: 1,
         _stderr: Some(stderr),
@@ -330,7 +395,7 @@ pub async fn spawn_fanin_with_args(args: &[String]) -> JsonRpcChild {
 
     JsonRpcChild {
         child: ChildGuard { child },
-        stdin,
+        stdin: Some(stdin),
         stdout: BufReader::new(stdout),
         next_id: 1,
         _stderr: Some(stderr),
@@ -556,5 +621,6 @@ fn kill_process_by_id(pid: u32) -> std::io::Result<()> {
     }
 }
 
+pub mod elicit;
 pub mod expectations;
 pub mod fixtures;

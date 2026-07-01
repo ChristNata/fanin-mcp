@@ -26,10 +26,11 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::time::timeout;
 
 use crate::common;
+use crate::common::elicit as el;
 use crate::common::fixtures as fx;
 
 /// Deadline for a meta-tool call that may trigger a lazy spawn.
@@ -420,5 +421,233 @@ async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
         "alpha__slow_tool must time out with code upstream_timeout; got: {slow_err:?}"
     );
 
+    child.into_guard().shutdown().await.ok();
+}
+
+// ---- Elicitation lifecycle (v1.1 / Phase 4) --------------------------------
+//
+// Adversarial/lifecycle tests for the elicitation-forwarding slice. These
+// cover SC8 (timeout-mid-prompt → non-accept, no hang), SC9 (disconnect-mid-
+// prompt → non-accept, no hang), and SC10 (a dropped/cancelled elicitation is
+// NEVER interpreted as accept — the direct default-deny assertion, not a
+// no-hang inference).
+//
+// The downstream test client DECLARES elicitation capability and either never
+// answers (SC8/SC10 timeout path), disconnects mid-prompt (SC9), or answers
+// with a JSON-RPC error (SC10 protocol-error path). The probe's
+// `needs_elicitation` tool encodes the non-accept outcome it received, so the
+// tests assert the DIRECT outcome via `el::assert_non_accept`.
+
+/// Deadline for the lifecycle tests. The proxy's per-server `timeout_secs` is
+/// the binding boundary (GP-3); the tests configure a SHORT `timeout_secs` so
+/// the timeout-mid-prompt case resolves quickly. 15s is a generous ceiling that
+/// still catches a hang.
+const ELICIT_LIFECYCLE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The configured `timeout_secs` for the elicitation timeout-mid-prompt proof.
+/// 2s is long enough that the forwarded elicitation arrives before the timeout
+/// fires, short enough that the test stays fast. The probe's own await backstop
+/// (30s) does not fire first.
+const ELICIT_TIMEOUT_SECS: u64 = 2;
+
+/// Master SC8 / GP-3: a timed-out downstream elicitation resolves to non-accept
+/// and the upstream tool call returns without hanging. The downstream client
+/// declares elicitation but NEVER answers the forwarded `elicitation/create`
+/// request. The proxy's per-server `timeout_secs` (2s) fires, the pending
+/// downstream elicitation is cancelled/dropped, and the probe's tool result
+/// encodes a non-accept outcome. The test asserts the DIRECT non-accept outcome
+/// (SC10 discipline) — a no-hang-only assertion is insufficient and is the
+/// exact security failure to prevent (a dropped response silently treated as
+/// accept).
+#[tokio::test]
+async fn elicitation_timeout_mid_prompt_resolves_non_accept_no_hang() {
+    let server = format!("srv-{}", fx::phase3_unique_seq());
+    let cfg = fx::Phase3ConfigBuilder::new()
+        .server(fx::Phase3ServerEntry::new(server.clone()).with_timeout_secs(ELICIT_TIMEOUT_SECS))
+        .namespace(fx::NamespaceEntry::new("default", [server.as_str()]))
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+
+    let started = std::time::Instant::now();
+    // Send the invoke_tool request without awaiting — the probe awaits the
+    // forwarded elicitation, which we never answer. The proxy's 2s timeout
+    // fires and the call resolves to a non-accept outcome.
+    let call_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": format!("{server}__needs_elicitation"),
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    // Await the forwarded elicitation/create request (it arrives before the
+    // timeout fires). Do NOT answer it.
+    let _req = el::await_elicitation_request(&mut child).await;
+    // The proxy's tool-call timeout (2s) fires and the call resolves to a
+    // non-accept outcome. Wait within a generous ceiling that still catches a
+    // hang.
+    let resp = timeout(ELICIT_LIFECYCLE_DEADLINE, child.wait_for_id(call_id))
+        .await
+        .expect(
+            "needs_elicitation with a never-answered forwarded elicitation must resolve \
+             via the proxy tool-call timeout, not hang (SC8 / GP-3)",
+        );
+    common::assert_no_rpc_error(&resp, "needs_elicitation timeout-mid-prompt");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_elicitation timeout returned no result"));
+    // SC8 + SC10: assert the DIRECT non-accept outcome. The proxy's per-server
+    // tool-call timeout (2s) fires BEFORE the probe's 30s backstop, so the
+    // downstream result is fanin's structured `upstream_timeout` error
+    // (`isError:true`, no probe outcome payload), not the probe's encoded
+    // `{non_accept:true,...}` shape. An `isError:true` result is definitively
+    // non-accept — the proxy never maps a timeout to accept, so SC10 holds.
+    // `assert_non_accept_or_error` accepts EITHER shape and still FAILS on an
+    // accept/success result (direct default-deny preserved).
+    el::assert_non_accept_or_error(&result, "SC8 timeout-mid-prompt");
+    let elapsed = started.elapsed();
+    // The proxy's 2s timeout is the binding boundary; allow generous slack for
+    // CI. Anything approaching the probe's 30s backstop is a bug (the proxy
+    // did not apply its timeout).
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "SC8: timeout-mid-prompt must resolve near the {ELICIT_TIMEOUT_SECS}s tool \
+         timeout; took {elapsed:?} (the proxy's tool-call timeout may not have fired)"
+    );
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC9 / GP-4: a downstream disconnect during elicitation resolves to
+/// non-accept and the upstream tool call returns without hanging. The
+/// downstream client declares elicitation, the forwarded `elicitation/create`
+/// arrives, then the downstream client disconnects (we close stdin / EOF). The
+/// proxy's forward await terminates (peer error/closed) and maps to non-accept.
+///
+/// Observable as PROCESS EXIT, not as a readable wire response. Closing the
+/// downstream stdin sends the proxy EOF on ITS stdin, so the proxy's
+/// `running.waiting()` returns and the proxy EXITS — which closes its stdout,
+/// making `wait_for_id` fail with a read error (not a hang). The real SC9 / GP-4
+/// invariant is that the awaiting upstream handler does NOT hang after the
+/// disconnect: a hung forward-await would keep the proxy process alive past the
+/// deadline. We assert the proxy exits cleanly within the deadline (no hang)
+/// — the observable that survives the disconnect. This is a real no-hang
+/// assertion, not a no-op: a regression that blocks the forward-await on the
+/// dropped peer would keep the process alive and time out here.
+#[tokio::test]
+async fn elicitation_disconnect_mid_prompt_resolves_non_accept_no_hang() {
+    let server = format!("srv-{}", fx::phase3_unique_seq());
+    // A long per-server timeout (30s) so the proxy's tool-call deadline does
+    // NOT fire first — the disconnect is the binding lifecycle event here. If
+    // the proxy hung on the forward-await, this test would wait the full
+    // deadline and fail, not exit via the tool-call timeout.
+    let cfg = fx::Phase3ConfigBuilder::new()
+        .server(fx::Phase3ServerEntry::new(server.clone()).with_timeout_secs(30))
+        .namespace(fx::NamespaceEntry::new("default", [server.as_str()]))
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+
+    let _call_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": format!("{server}__needs_elicitation"),
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    // Await the forwarded elicitation/create request so we KNOW the proxy is
+    // blocked on the downstream answer before we disconnect.
+    let _req = el::await_elicitation_request(&mut child).await;
+    // Disconnect the downstream client: close stdin (EOF). The proxy's stdio
+    // transport observes the peer-close; the forwarded elicitation await must
+    // terminate (peer error / closed) and map to non-accept (GP-4). The proxy
+    // then drains and exits.
+    child.close_stdin().await;
+    // The load-bearing SC9 / GP-4 assertion: the proxy process EXITS within a
+    // deadline after the disconnect — a hung forward-await (the exact failure
+    // SC9 prevents) would keep it alive past the deadline. We cannot read the
+    // probe's tool result on stdout after a client-stdin close (the proxy
+    // exits and closes its stdout), so process exit is the observable. 10s is
+    // generous for a clean drain and still catches a hang.
+    let guard = child.into_guard();
+    let status = guard
+        .wait_for_exit_within(ELICIT_LIFECYCLE_DEADLINE)
+        .await
+        .expect(
+            "needs_elicitation with a mid-prompt downstream disconnect must NOT hang the \
+             proxy — the forward await must terminate on peer-close and the process must \
+             exit within the deadline (SC9 / GP-4)",
+        );
+    // A clean exit (the proxy drained and stopped) is the success shape. A
+    // crash exit is also acceptable here: the disconnect path is allowed to
+    // terminate abruptly as long as it does not hang. What is NOT acceptable
+    // is no exit within the deadline (handled by the `expect` above).
+    assert!(
+        status.code().is_some(),
+        "SC9: proxy must exit (not be killed) within the deadline after a mid-prompt \
+         disconnect; got a signal kill or no exit code"
+    );
+}
+
+/// Master SC10: a downstream JSON-RPC error response to the forwarded
+/// elicitation is never interpreted as accept. The downstream client answers
+/// the `elicitation/create` request with an explicit JSON-RPC error; the proxy
+/// relays the error to the upstream; the probe encodes a non-accept outcome.
+/// This is the protocol-error path of the default-deny invariant — distinct
+/// from timeout (SC8) and disconnect (SC9) but the same security guarantee: a
+/// non-accept outcome is never silently treated as accept.
+#[tokio::test]
+async fn elicitation_downstream_error_response_never_treated_as_accept() {
+    let server = format!("srv-{}", fx::phase3_unique_seq());
+    let cfg = fx::Phase3ConfigBuilder::new()
+        .server(fx::Phase3ServerEntry::new(server.clone()).with_timeout_secs(30))
+        .namespace(fx::NamespaceEntry::new("default", [server.as_str()]))
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+
+    let call_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": format!("{server}__needs_elicitation"),
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    let req = el::await_elicitation_request(&mut child).await;
+    let elicit_id = req
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("forwarded elicitation/create missing id: {req:?}"));
+    // Answer with an explicit JSON-RPC error (a non-accept outcome at the
+    // protocol level).
+    el::answer_error(&mut child, elicit_id, -32000, "client declined to elicit").await;
+    let resp = timeout(ELICIT_LIFECYCLE_DEADLINE, child.wait_for_id(call_id))
+        .await
+        .expect(
+            "needs_elicitation with a downstream error response must resolve, not hang \
+             (SC10)",
+        );
+    common::assert_no_rpc_error(&resp, "needs_elicitation downstream-error");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_elicitation downstream-error returned no result"));
+    let outcome = el::parse_elicitation_outcome(&result, "SC10 downstream-error");
+    el::assert_non_accept(&outcome, "SC10 downstream-error");
     child.into_guard().shutdown().await.ok();
 }

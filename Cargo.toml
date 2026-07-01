@@ -1,6 +1,6 @@
 [package]
 name = "fanin-mcp"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -53,6 +53,7 @@ rmcp = { version = "=1.8.0", default-features = false, features = [
     "transport-child-process",
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest",
+    "elicitation",
 ] }
 
 # process-wrap — provides JobObject (Windows) and ProcessSession/ProcessGroup (Unix)

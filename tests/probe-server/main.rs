@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, CreateElicitationRequest,
-    CreateElicitationRequestParams, CreateMessageRequest, CreateMessageRequestParams,
-    ElicitationSchema, Implementation, InitializeResult, JsonObject, ListRootsRequest,
-    ListToolsResult, PaginatedRequestParams, SamplingMessage, ServerCapabilities, ServerInfo,
-    ServerRequest, Tool, ToolAnnotations,
+    CallToolRequestParams, CallToolResult, ClientResult, Content, CreateElicitationRequest,
+    CreateElicitationRequestParams, CreateElicitationResult, CreateMessageRequest,
+    CreateMessageRequestParams, ElicitationAction, ElicitationSchema, Implementation,
+    InitializeResult, JsonObject, ListRootsRequest, ListToolsResult, PaginatedRequestParams,
+    SamplingMessage, ServerCapabilities, ServerInfo, ServerRequest, Tool, ToolAnnotations,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
@@ -132,6 +132,17 @@ const POISON_VALIDATION: &str = "poison_validation";
 /// `report_cwd` — remediation D-1. Returns the probe process working
 /// directory so tests can assert `cwd` was applied to the child process.
 const REPORT_CWD: &str = "report_cwd";
+
+/// `report_client_caps` — elicitation-forwarding Phase 4. Returns the
+/// elicitation capability the probe OBSERVED on the aggregator client during
+/// initialize. The probe records the aggregator's `InitializeRequestParam` (the
+/// peer's capabilities) when `list_tools` runs; this tool reports the observed
+/// capability so a black-box test can assert capability-honesty (GP-1 / SC3):
+/// `report_client_caps` returns `{"elicitation": true}` when the downstream
+/// client declared elicitation, `{"elicitation": false}` otherwise. The probe
+/// reads `peer_info` live so the value reflects whatever the current downstream
+/// client declared at initialize time.
+const REPORT_CLIENT_CAPS: &str = "report_client_caps";
 
 const HANG_DURING_INITIALIZE_ARG: &str = "--hang-during-initialize";
 const HANG_DURING_LIST_TOOLS_ARG: &str = "--hang-during-list-tools";
@@ -280,6 +291,13 @@ fn probe_tools() -> Vec<Tool> {
     ];
     if std::env::var("FANIN_PROBE_REPORT_CWD").as_deref() == Ok("1") {
         tools.push(report_cwd_tool());
+    }
+    // Elicitation-forwarding Phase 4: the client-caps reporter is gated on an
+    // env var so the existing static-set discovery tests (which hardcode the
+    // tool count at 16) stay GREEN. Elicitation capability-honesty tests set
+    // FANIN_PROBE_REPORT_CLIENT_CAPS=1 to expose the tool.
+    if std::env::var("FANIN_PROBE_REPORT_CLIENT_CAPS").as_deref() == Ok("1") {
+        tools.push(report_client_caps_tool());
     }
     if MUTATE_ADDED.load(Ordering::SeqCst) {
         tools.push(added_tool());
@@ -713,6 +731,36 @@ fn report_cwd_tool() -> Tool {
     )
 }
 
+/// `report_client_caps` tool definition (elicitation-forwarding Phase 4). No
+/// arguments; returns JSON describing the elicitation capability the probe
+/// OBSERVED on the aggregator client during initialize. Used by the
+/// capability-honesty assertion (SC3): the probe reports
+/// `{"elicitation": true}` when the downstream client declared elicitation,
+/// `{"elicitation": false}` otherwise. The probe reads `peer_info` live so
+/// the value reflects whatever the current downstream client declared.
+fn report_client_caps_tool() -> Tool {
+    Tool::new(
+        REPORT_CLIENT_CAPS,
+        "Reports the elicitation capability the aggregator client declared.",
+        empty_object_schema(),
+    )
+}
+
+/// `report_client_caps` dispatch: read the aggregator's initialize-time
+/// client capabilities from the live peer info and report whether elicitation
+/// was declared. Returns `{"elicitation": <bool>}`. A test asserts the bool
+/// matches what the downstream test client declared (true / false) so a stub
+/// that unconditionally advertises elicitation fails (GP-1 / SC3 honesty).
+fn report_client_caps(context: RequestContext<RoleServer>) -> CallToolResult {
+    let peer = context.peer.clone();
+    let has_elicitation = peer
+        .peer_info()
+        .map(|info| info.capabilities.elicitation.is_some())
+        .unwrap_or(false);
+    let payload = serde_json::json!({ "elicitation": has_elicitation });
+    CallToolResult::success(vec![Content::text(payload.to_string())])
+}
+
 /// `toggle_long_tool` tool definition (review fix F2). Toggles the F2
 /// `long_named_tool` (120-char name) in the probe's runtime tool list. Clean
 /// name + description. Does NOT emit `notifications/tools/list_changed` — the
@@ -773,7 +821,7 @@ async fn dispatch(
         DANGEROUS_NOOP => dangerous_noop(),
         NEEDS_SAMPLING => needs_sampling(context),
         ECHO_IMAGE => echo_image(),
-        NEEDS_ELICITATION => needs_elicitation(context),
+        NEEDS_ELICITATION => needs_elicitation(context).await,
         NEEDS_ROOTS => needs_roots(context),
         ECHO_ENV => echo_env(arguments),
         SPAWN_GRANDCHILD => spawn_grandchild(arguments).await,
@@ -785,6 +833,7 @@ async fn dispatch(
         LONG_TOOL_NAME => echo_ok(arguments),
         POISON_VALIDATION => echo_ok(arguments),
         REPORT_CWD => report_cwd(),
+        REPORT_CLIENT_CAPS => report_client_caps(context),
         MUTATE_ADDED_TOOL => CallToolResult::success(vec![Content::text(
             "added_tool: runtime-added tool called successfully".to_string(),
         )]),
@@ -895,27 +944,113 @@ fn echo_image() -> CallToolResult {
 
 /// `needs_elicitation`: send an `elicitation/create` request from the server
 /// role up to the client (D-008). Mirrors `needs_sampling`, swapping the
-/// reverse-traffic request type.
+/// reverse-traffic request type. AWAITS the client response and returns a tool
+/// result reflecting the outcome (SC5/SC6/SC7 / GP-5).
 ///
-/// Nothing in Phase 0 answers it, so the probe must not block its `call_tool`
-/// future on the response — that would hang the whole server (GOTCHA #2).
-fn needs_elicitation(context: RequestContext<RoleServer>) -> CallToolResult {
+/// The probe SENDS the request, AWAITS the response, and returns a tool result
+/// encoding the outcome: accept with content, decline, cancel, or an
+/// error/timeout outcome. A test asserts on the forwarded downstream
+/// `invoke_tool` result (the probe's tool result) — so the probe must encode the
+/// outcome visibly. A non-accept outcome is marked with `non_accept: true` and
+/// its specific action so the test can assert non-accept DIRECTLY (SC10) rather
+/// than inferring from a no-hang wrapper alone. The probe does NOT block its
+/// `call_tool` future indefinitely — it races the response against
+/// `ELICITATION_AWAIT_TIMEOUT` (30s, generous so a slow human-prompt path under
+/// the tool timeout is still observable) and maps a timeout/error to non-accept.
+async fn needs_elicitation(context: RequestContext<RoleServer>) -> CallToolResult {
     let peer = context.peer.clone();
     let request = build_elicitation_request();
-    tokio::spawn(async move {
-        // The load-bearing side effect is the outbound JSON-RPC request on
-        // stdout. The unanswered response may time out or error.
-        if tokio::time::timeout(SAMPLING_REQUEST_TIMEOUT, peer.send_request(request))
-            .await
-            .is_err()
-        {
-            tracing::warn!("probe-server elicitation/create request timed out");
+    // Race the forwarded elicitation response against a generous backstop
+    // timeout. The proxy's tool-call timeout (default 60s, configurable per
+    // server) is the binding lifecycle boundary (GP-3); this probe-side await
+    // is a backstop, not the policy. A timed-out or errored send maps to a
+    // non-accept error result so the downstream test asserts non-accept
+    // directly (SC10).
+    let outcome = tokio::time::timeout(ELICITATION_AWAIT_TIMEOUT, async {
+        match peer.send_request(request).await {
+            Ok(ClientResult::CreateElicitationResult(result)) => {
+                encode_elicitation_outcome(&result)
+            }
+            Ok(other) => encode_non_accept(
+                "unexpected_result",
+                &format!("unexpected ClientResult variant: {other:?}"),
+            ),
+            Err(e) => encode_non_accept(
+                "send_error",
+                &format!("elicitation/create send failed: {e}"),
+            ),
         }
-    });
-    CallToolResult::success(vec![Content::text(
-        "needs_elicitation: sent elicitation/create request to client".to_string(),
-    )])
+    })
+    .await;
+    match outcome {
+        Ok(result) => result,
+        Err(_elapsed) => encode_non_accept(
+            "probe_await_timeout",
+            &format!("probe await timed out after {ELICITATION_AWAIT_TIMEOUT:?}"),
+        ),
+    }
 }
+
+/// Encode a non-accept outcome (send error, timeout, unexpected result variant)
+/// as a `CallToolResult::error` carrying a JSON payload with
+/// `elicitation_action` / `non_accept` / `content` so a downstream test asserts
+/// non-accept DIRECTLY (SC10) regardless of which unhappy path fired. The
+/// `elicitation_action` is a stable label (`send_error` / `probe_await_timeout`
+/// / `unexpected_result`) distinct from the rmcp-defined `accept` / `decline`
+/// / `cancel` so a test can still distinguish a protocol-level decline/cancel
+/// from a transport-level failure.
+fn encode_non_accept(action: &str, message: &str) -> CallToolResult {
+    let payload = serde_json::json!({
+        "elicitation_action": action,
+        "non_accept": true,
+        "content": "null",
+        "message": message,
+    });
+    CallToolResult::error(vec![Content::text(payload.to_string())])
+}
+
+/// Encode a `CreateElicitationResult` into a probe `CallToolResult` so a
+/// downstream test asserts the outcome DIRECTLY (SC5/SC6/SC7/SC10). The
+/// `elicitation_action` text field carries `accept` / `decline` / `cancel`
+/// verbatim; `non_accept` is `true` for any non-Accept outcome so a test can
+/// assert non-accept with a single check. `content` is embedded as a nested
+/// JSON VALUE (the accept payload object) when present (Accept only) so a
+/// downstream test can read `outcome.content.<field>` directly (D-004).
+fn encode_elicitation_outcome(result: &CreateElicitationResult) -> CallToolResult {
+    // Embed `content` as a nested JSON VALUE, not its `.to_string()`. The
+    // probe's tool-result JSON carries `content` as the accept payload object
+    // itself (e.g. `{"content":{"answer":"yes"}}`) so a downstream test can
+    // read `outcome.content.answer` directly. Stringifying `content` first
+    // would emit a JSON *string* (`"content":"{\"answer\":\"yes\"}"`) and the
+    // round-trip assertion would see a `String`, not an object (D-004).
+    let (action_str, non_accept, content_value): (&'static str, bool, serde_json::Value) =
+        match result.action {
+            ElicitationAction::Accept => (
+                "accept",
+                false,
+                result.content.clone().unwrap_or(serde_json::Value::Null),
+            ),
+            ElicitationAction::Decline => ("decline", true, serde_json::Value::Null),
+            ElicitationAction::Cancel => ("cancel", true, serde_json::Value::Null),
+        };
+    let is_error = non_accept;
+    let payload = serde_json::json!({
+        "elicitation_action": action_str,
+        "non_accept": non_accept,
+        "content": content_value,
+    });
+    if is_error {
+        CallToolResult::error(vec![Content::text(payload.to_string())])
+    } else {
+        CallToolResult::success(vec![Content::text(payload.to_string())])
+    }
+}
+
+/// How long the probe awaits the forwarded elicitation response before mapping
+/// to a non-accept timeout. Generous (30s) so the proxy's tool timeout
+/// (default 60s, configurable per server) is the binding lifecycle boundary;
+/// the probe's own await is a backstop, not the policy.
+const ELICITATION_AWAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the `elicitation/create` request payload.
 ///

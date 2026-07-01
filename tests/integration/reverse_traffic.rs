@@ -22,10 +22,11 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::time::timeout;
 
 use crate::common;
+use crate::common::elicit as el;
 use crate::common::fixtures as fx;
 
 /// Deadline for a reverse-traffic call. The probe's `needs_sampling` emits
@@ -529,21 +530,17 @@ async fn upstream_elicitation_request_receives_bounded_rejection() {
         .cloned()
         .unwrap_or_else(|| panic!("needs_elicitation returned no result field"));
 
-    // The probe returns a SUCCESS text block ("needs_elicitation: sent
-    // elicitation/create request to client") once its detached send future is
-    // spawned. The aggregator must forward that result byte-faithfully. A
-    // Phase 0 stub returns a not-implemented ERROR (isError: true) without
-    // forwarding — so asserting SUCCESS here makes the test fail RED against
-    // the stub and pass GREEN once real forwarding + the elicitation-reject
-    // handler land.
-    if let Some(is_error) = result.get("isError") {
-        assert_ne!(
-            is_error.as_bool(),
-            Some(true),
-            "needs_elicitation must forward the probe's success result, not a \
-             not-implemented error (isError must not be true)"
-        );
-    }
+    // v1.1: the probe now AWAITS the forwarded elicitation and encodes the
+    // outcome it received. With no downstream elicitation capability
+    // (phase1_child uses empty caps), the aggregator rejects and the probe
+    // encodes a non-accept outcome as `CallToolResult::error` (isError: true)
+    // carrying a JSON payload with `non_accept: true`. The direct non-accept
+    // assertion lives in
+    // `elicitation_no_capability_takes_bounded_rejection_path`; this test
+    // guards the no-hang + no-JSON-RPC-error contract that the Phase 1
+    // reverse-traffic suite established. The text must mention elicitation so
+    // the test still catches a stub that returns a generic not-implemented
+    // error without exercising the elicitation path.
     let text = result
         .get("content")
         .and_then(|c| c.as_array())
@@ -560,9 +557,346 @@ async fn upstream_elicitation_request_receives_bounded_rejection() {
         .join("");
     assert!(
         text.contains("elicitation") || text.contains("needs_elicitation"),
-        "needs_elicitation must forward the probe's success text (the probe \
-         confirms it sent the elicitation request); got: {text:?}"
+        "needs_elicitation must forward the probe's outcome text (the probe \
+         confirms it sent the elicitation request and encoded the rejection); \
+         got: {text:?}"
     );
 
+    child.into_guard().shutdown().await.ok();
+}
+
+// ---- Elicitation forwarding (v1.1 / Phase 4) --------------------------------
+//
+// These tests extend the reverse-traffic suite with the v1.1 elicitation-
+// forwarding slice. The downstream test client DECLARES elicitation capability
+// at initialize and answers `elicitation/create` requests over the same stdio
+// stream. The probe's `needs_elicitation` tool now AWAITS the forwarded
+// response and returns a tool result encoding the outcome
+// (`elicitation_action` + `non_accept`), so these tests assert the DIRECT
+// outcome rather than inferring from a no-hang wrapper (SC10 assertion
+// discipline).
+//
+// Coverage: SC3 (capability honesty), SC4 (no-cap rejection regression),
+// SC5 (accept forwarded), SC6 (decline distinct), SC7 (cancel distinct),
+// SC13/SC14 (sampling/roots regressions preserved alongside the new path).
+// Lifecycle (SC8/SC9/SC10) lives in `timeout_cancellation.rs`; concurrency
+// (SC11/SC12) lives in `multi_upstream.rs`.
+
+/// Deadline for an elicitation-forwarding round-trip. Generous enough that a
+/// correct forwarding path (downstream accept + probe encode + forward back)
+/// never misses it, tight enough that a hang fails the test fast.
+const ELICIT_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Helper: spawn fanin with the canonical Phase 1 config + the probe env var
+/// that exposes `report_client_caps`, initialize declaring elicitation
+/// capability, and return the live child ready for a meta-tool call. The env
+/// var is set on the probe via the config's `[servers.probe.env]` table
+/// (fanin's least-privilege `env_clear` means the probe does NOT inherit
+/// fanin's ambient env — only config-declared vars reach the probe, D-010).
+async fn elicitation_capable_child() -> common::JsonRpcChild {
+    let cfg = fx::ConfigBuilder::new()
+        .env("FANIN_PROBE_REPORT_CLIENT_CAPS", "1")
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_declaring_elicitation(&mut child).await;
+    child
+}
+
+/// Helper: spawn fanin with the canonical Phase 1 config + the probe env var
+/// that exposes `report_client_caps`, initialize declaring NO elicitation
+/// capability, and return the live child. Used by the no-capability regression
+/// (SC4) and the capability-honesty negative arm (SC3).
+async fn no_elicitation_child() -> common::JsonRpcChild {
+    let cfg = fx::ConfigBuilder::new()
+        .env("FANIN_PROBE_REPORT_CLIENT_CAPS", "1")
+        .write();
+    let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
+    el::initialize_without_elicitation(&mut child).await;
+    child
+}
+
+/// The downstream client's answer to a forwarded `elicitation/create` request.
+/// Used by `drive_elicitation` so each SC5/SC6/SC7 test stays focused on its
+/// assertion rather than re-deriving the wire-answer shape.
+enum Answer {
+    Accept(Value),
+    Decline,
+    Cancel,
+}
+
+/// Drive a `probe__needs_elicitation` call that triggers a forwarded
+/// `elicitation/create`, await the forwarded request, answer it per `answer`,
+/// and return the downstream `invoke_tool` CallToolResult. Bundles the common
+/// shape so each SC5/SC6/SC7 test stays focused on its assertion.
+async fn drive_elicitation(answer: Answer) -> Value {
+    let mut child = elicitation_capable_child().await;
+    // Send the invoke_tool request without awaiting its response — the probe
+    // awaits the forwarded elicitation, so the tools/call response will not
+    // arrive until AFTER we answer the elicitation/create request (or the
+    // proxy's tool-call timeout fires for the Never case).
+    let call_id = child
+        .send_request(
+            "tools/call",
+            json!({
+                "name": "invoke_tool",
+                "arguments": {
+                    "name": "probe__needs_elicitation",
+                    "arguments": {},
+                },
+            }),
+        )
+        .await;
+    // Await the forwarded elicitation/create request on the wire. For the
+    // Never case the request still arrives (the proxy forwards before the
+    // timeout fires); we just do not answer it.
+    let req = el::await_elicitation_request(&mut child).await;
+    let elicit_id = req
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("forwarded elicitation/create missing id: {req:?}"));
+    match answer {
+        Answer::Accept(content) => el::answer_accept(&mut child, elicit_id, content).await,
+        Answer::Decline => el::answer_decline(&mut child, elicit_id).await,
+        Answer::Cancel => el::answer_cancel(&mut child, elicit_id).await,
+    }
+    // Now the probe's call_tool resolves (or the proxy times out for Never)
+    // and the downstream tools/call response arrives. Wait for it within the
+    // deadline (no-hang guard).
+    let resp = timeout(ELICIT_DEADLINE, child.wait_for_id(call_id))
+        .await
+        .expect(
+            "probe__needs_elicitation must complete within ELICIT_DEADLINE once the \
+             downstream client answers the forwarded elicitation — a hang means the \
+             proxy did not relay the client's answer back upstream (SC5/GP-5)",
+        );
+    common::assert_no_rpc_error(&resp, "invoke_tool probe__needs_elicitation");
+    resp.get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_elicitation returned no result field"))
+}
+
+/// Master SC3 / GP-1: capability honesty. A downstream client that DECLARES
+/// elicitation causes fanin-mcp's upstream client handler to ADVERTISE
+/// elicitation to the probe. The probe's `report_client_caps` tool reports the
+/// elicitation capability it observed on the aggregator client at initialize:
+/// `{"elicitation": true}`. A stub that unconditionally advertises (or never
+/// advertises) fails this assertion.
+#[tokio::test]
+async fn downstream_declares_elicitation_aggregator_advertises_to_upstream() {
+    let mut child = elicitation_capable_child().await;
+    let resp = timeout(
+        ELICIT_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            json!({ "name": "probe__report_client_caps", "arguments": {} }),
+        ),
+    )
+    .await
+    .expect("report_client_caps must complete");
+    common::assert_no_rpc_error(&resp, "report_client_caps (declare arm)");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("report_client_caps returned no result"));
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "report_client_caps must forward the probe's success result"
+        );
+    }
+    let caps = el::parse_elicitation_outcome(&result, "report_client_caps (declare arm)");
+    let declared = caps
+        .get("elicitation")
+        .and_then(|e| e.as_bool())
+        .unwrap_or_else(|| panic!("report_client_caps missing elicitation bool: {caps:?}"));
+    assert!(
+        declared,
+        "SC3 / GP-1: when the downstream client declares elicitation, fanin-mcp must \
+         advertise elicitation to the upstream (probe should observe \
+         elicitation=true); got {caps:?}"
+    );
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC3 negative arm: a downstream client that does NOT declare
+/// elicitation causes fanin-mcp to advertise NO elicitation to the upstream.
+/// The probe's `report_client_caps` reports `{"elicitation": false}`.
+#[tokio::test]
+async fn downstream_omits_elicitation_aggregator_advertises_nothing_extra() {
+    let mut child = no_elicitation_child().await;
+    let resp = timeout(
+        ELICIT_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            json!({ "name": "probe__report_client_caps", "arguments": {} }),
+        ),
+    )
+    .await
+    .expect("report_client_caps must complete");
+    common::assert_no_rpc_error(&resp, "report_client_caps (no-declare arm)");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("report_client_caps returned no result"));
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "report_client_caps must forward the probe's success result"
+        );
+    }
+    let caps = el::parse_elicitation_outcome(&result, "report_client_caps (no-declare arm)");
+    let declared = caps
+        .get("elicitation")
+        .and_then(|e| e.as_bool())
+        .unwrap_or_else(|| panic!("report_client_caps missing elicitation bool: {caps:?}"));
+    assert!(
+        !declared,
+        "SC3 / GP-1: when the downstream client does NOT declare elicitation, fanin-mcp \
+         must NOT advertise elicitation to the upstream (probe should observe \
+         elicitation=false); got {caps:?}"
+    );
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC5: `probe__needs_elicitation` forwards the raw request to an
+/// elicitation-capable downstream client, the client answers ACCEPT with
+/// content, and the probe's tool result relays the accept back through the
+/// upstream call path. Asserts the DIRECT outcome (accept) and that the call
+/// completes within the deadline (no hang).
+#[tokio::test]
+async fn elicitation_accept_forwarded_end_to_end() {
+    let result = drive_elicitation(Answer::Accept(json!({ "answer": "yes" }))).await;
+    if let Some(is_error) = result.get("isError") {
+        assert_ne!(
+            is_error.as_bool(),
+            Some(true),
+            "needs_elicitation accept must forward the probe's success result"
+        );
+    }
+    let outcome = el::parse_elicitation_outcome(&result, "SC5 accept");
+    el::assert_accept(&outcome, "SC5 accept");
+    el::assert_action(&outcome, "accept", "SC5 accept");
+    // The accept content round-trips byte-faithfully (D-004 / GP-8).
+    let content = el::accept_content(&outcome);
+    assert_eq!(
+        content.get("answer").and_then(|a| a.as_str()),
+        Some("yes"),
+        "SC5: accept content must round-trip byte-faithfully; got {content:?}"
+    );
+}
+
+/// Master SC6: a decline response from the downstream client is observable as
+/// non-accept and is NOT rewritten as accept. Asserts the DIRECT outcome
+/// (action=decline, non_accept=true). A stub that silently treats decline as
+/// accept fails this assertion — the exact security failure SC10 prevents.
+#[tokio::test]
+async fn elicitation_decline_is_distinct_non_accept() {
+    let result = drive_elicitation(Answer::Decline).await;
+    let outcome = el::parse_elicitation_outcome(&result, "SC6 decline");
+    el::assert_non_accept(&outcome, "SC6 decline");
+    el::assert_action(&outcome, "decline", "SC6 decline");
+}
+
+/// Master SC7: a cancel response from the downstream client is observable as
+/// non-accept and is NOT rewritten as accept. Asserts the DIRECT outcome
+/// (action=cancel, non_accept=true). Distinct from decline (GP-5).
+#[tokio::test]
+async fn elicitation_cancel_is_distinct_non_accept() {
+    let result = drive_elicitation(Answer::Cancel).await;
+    let outcome = el::parse_elicitation_outcome(&result, "SC7 cancel");
+    el::assert_non_accept(&outcome, "SC7 cancel");
+    el::assert_action(&outcome, "cancel", "SC7 cancel");
+}
+
+/// Master SC4 / GOTCHA #8 regression: with a downstream client that does NOT
+/// declare elicitation, `probe__needs_elicitation` takes the EXISTING bounded
+/// rejection path and does NOT hang. The probe's tool result reflects the
+/// rejection (non-accept outcome), and the call completes within the deadline.
+/// This preserves the MVP reverse-traffic contract — forwarding is gated on
+/// the downstream capability, and the no-capability arm is still rejection.
+#[tokio::test]
+async fn elicitation_no_capability_takes_bounded_rejection_path() {
+    let mut child = no_elicitation_child().await;
+    let started = std::time::Instant::now();
+    let resp = timeout(
+        ELICIT_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            json!({ "name": "probe__needs_elicitation", "arguments": {} }),
+        ),
+    )
+    .await
+    .expect(
+        "needs_elicitation with no downstream elicitation capability must complete via \
+         the bounded rejection path, not hang (SC4 / GOTCHA #2)",
+    );
+    common::assert_no_rpc_error(&resp, "needs_elicitation no-cap rejection");
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("needs_elicitation no-cap returned no result"));
+    // The probe encodes the rejection it received as a non-accept outcome. The
+    // exact rejection shape (structured error vs error result) depends on how
+    // fanin-mcp relays the `elicitation_rejected` error; either way the probe
+    // surfaces a non-accept outcome. Assert non-accept directly.
+    let outcome = el::parse_elicitation_outcome(&result, "SC4 no-cap rejection");
+    el::assert_non_accept(&outcome, "SC4 no-cap rejection");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "no-capability rejection must be fast; took {elapsed:?}"
+    );
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC13 regression: sampling remains rejected by `create_message` even
+/// after the elicitation-forwarding slice lands. The probe's `needs_sampling`
+/// tool sends `sampling/createMessage`; the aggregator rejects it; the probe's
+/// tool call completes (not hung). No sampling forwarding path was added.
+#[tokio::test]
+async fn sampling_remains_rejected_under_elicitation_forwarding() {
+    let mut child = elicitation_capable_child().await;
+    let resp = timeout(
+        ELICIT_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            json!({ "name": "probe__needs_sampling", "arguments": {} }),
+        ),
+    )
+    .await
+    .expect("needs_sampling must complete (sampling rejected, not hung — SC13)");
+    common::assert_no_rpc_error(&resp, "needs_sampling under elicitation forwarding");
+    // The probe's needs_sampling still returns its detached success text; the
+    // observable contract is that the call completes (the reverse-path
+    // sampling request was rejected, not forwarded). A stub that ADDS a
+    // sampling forwarding path would hang waiting for a downstream sampling
+    // answer that never comes — caught by the deadline.
+    child.into_guard().shutdown().await.ok();
+}
+
+/// Master SC14 regression: roots remains an empty `list_roots` response even
+/// after the elicitation-forwarding slice lands. The probe's `needs_roots` tool
+/// sends `roots/list`; the aggregator answers with an empty list; the probe's
+/// tool call completes (not hung). No roots forwarding path was added.
+#[tokio::test]
+async fn roots_remain_empty_under_elicitation_forwarding() {
+    let mut child = elicitation_capable_child().await;
+    let resp = timeout(
+        ELICIT_DEADLINE,
+        common::call_tool(
+            &mut child,
+            "invoke_tool",
+            json!({ "name": "probe__needs_roots", "arguments": {} }),
+        ),
+    )
+    .await
+    .expect("needs_roots must complete (roots empty, not hung — SC14)");
+    common::assert_no_rpc_error(&resp, "needs_roots under elicitation forwarding");
     child.into_guard().shutdown().await.ok();
 }

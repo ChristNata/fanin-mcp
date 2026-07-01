@@ -35,7 +35,7 @@ Creds duplicated per project/CLI        Creds once, in the OS keychain
 - **Namespace-based access control.** `--namespace <id>` scopes which servers (and optionally which tools per server) are visible. This is the primary permission layer.
 - **Lazy connections.** Upstreams are spawned/connected on the first tool call that targets them — never at startup.
 - **Streamable HTTP is loopback-only in v1.0.0.** `transport = "streamable-http"` supports loopback `http://` upstreams only; no TLS backend is linked. Remote servers are reached exclusively via stdio/npx upstreams (e.g. `npx -y @upstash/context7-mcp`).
-- **No silent hangs on bidirectional traffic.** Upstream-originated requests (`sampling/createMessage`, `elicitation/create`) get immediate structured rejections and `roots/list` gets an empty list — upstreams never hang waiting on the proxy. Capability-mirrored forwarding to capable clients is planned for v1.1.
+- **No silent hangs on bidirectional traffic.** Upstream `elicitation/create` forwards to the downstream client **only when that client declared elicitation capability** (capability-gated, D-020); on timeout/disconnect/cancel the outcome resolves to a safe non-accept, never accept. `sampling/createMessage` is still rejected and `roots/list` returns empty — sampling and roots forwarding are planned for a later v1.1 slice. Upstreams never hang waiting on the proxy.
 - **Structured errors.** Upstream failures return as readable JSON inside the tool result (`isError: true`) with a `recoverable` flag — verified to reach the model as conversational content on both CC and OC.
 
 ## Quick start
@@ -128,7 +128,7 @@ fanin-mcp/
 │   ├── main.rs              # CLI entry point, subcommands, config loading
 │   ├── server.rs             # rmcp ServerHandler — meta-tools + routing
 │   ├── registry.rs           # Upstream registry + lazy connections (Arc-per-connection)
-│   ├── forward.rs            # Upstream-originated request handling (clean reject in MVP; forwarding v1.1)
+│   ├── forward.rs            # Upstream-originated request handling (elicitation forwarded capability-gated; sampling/roots rejected/empty)
 │   ├── process.rs            # Platform process management (Job Objects / process groups, stderr capture)
 │   ├── namespace.rs          # Namespace ACL filtering
 │   ├── credentials.rs        # CredentialStore trait + keyring/env backends + cred subcommands
