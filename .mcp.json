@@ -1,6 +1,14 @@
 {
   "mcpServers": {
-    "context7": { "type": "http", "url": "https://mcp.context7.com/mcp" },
-    "glasswing": { "command": "glasswing", "args": ["docs", "--read-only=false"] }
+    "fanin-mcp": {
+      "type": "stdio",
+      "command": "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\fanin-mcp.exe",
+      "args": [
+        "--config",
+        "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\mcp\\config.toml",
+        "--namespace",
+        "p_a1aa687e"
+      ]
+    }
   }
 }

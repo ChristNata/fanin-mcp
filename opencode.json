@@ -1,14 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "context7": {
-      "type": "remote",
-      "url": "https://mcp.context7.com/mcp",
-      "enabled": true
-    },
-    "glasswing": {
+    "fanin-mcp": {
       "type": "local",
-      "command": ["glasswing", "docs", "--read-only=false"],
+      "command": [
+        "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\fanin-mcp.exe",
+        "--config",
+        "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\mcp\\config.toml",
+        "--namespace",
+        "p_a1aa687e"
+      ],
       "enabled": true
     }
   },
