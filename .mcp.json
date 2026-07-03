@@ -1,14 +1,3 @@
 {
-  "mcpServers": {
-    "fanin-mcp": {
-      "type": "stdio",
-      "command": "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\fanin-mcp.exe",
-      "args": [
-        "--config",
-        "C:\\Users\\Chrisyian\\AppData\\Local\\Covenant-dev\\mcp\\config.toml",
-        "--namespace",
-        "p_116644b1"
-      ]
-    }
-  }
+  "mcpServers": {}
 }

@@ -257,6 +257,34 @@ pub fn spawn_stdio_transport(
     // Least-privilege: start from a clean env, then inject ONLY this server's vars.
     // This prevents sibling credentials and the aggregator's ambient env from leaking.
     cmd.env_clear();
+    // Windows OS baseline (RCA 2026-07-03): a truly empty environment block
+    // breaks the child's network stack — `getaddrinfo` fails with `EAI_FAIL`
+    // when `SystemRoot` is absent, which Node/undici surfaces as
+    // `TypeError: fetch failed` inside the upstream (observed live with
+    // @upstash/context7-mcp; any Node upstream doing outbound fetch hits it).
+    // Re-inject the non-sensitive system vars a Windows process cannot
+    // function without. This stays least-privilege: no user, credential, or
+    // ambient application vars are forwarded, and the server's configured
+    // vars (below) still override. Note that naive reproductions miss this —
+    // Node's libuv and MSYS `env -i` both silently re-add SYSTEMROOT to
+    // children; only a truly empty block (Rust `env_clear`, Python
+    // `subprocess(env={})`) exhibits the failure.
+    #[cfg(windows)]
+    for key in [
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "PROGRAMDATA",
+        "NUMBER_OF_PROCESSORS",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
     for (key, value) in resolved_env {
         register_secret(value);
         cmd.env(key, value);
