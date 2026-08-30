@@ -26,7 +26,15 @@ This document states honestly what fanin-mcp protects against, what it cannot, a
     Log redaction is exact-substring matching of registered secret values — whole-secret appearances are caught and replaced with `[REDACTED]`; a secret that appears perturbed/partial (e.g. truncated by an upstream) is out of scope.
     Since H-3, every value resolved from a server's `[headers]` section (literal strings included, not only `${VAR}` expansions) is registered for redaction; choose header values distinct from any operational text your tracing layer may emit.
 3. **Least-privilege injection.** Credential env vars are injected per-child at spawn time; no upstream inherits the aggregator's full environment or another server's secrets.
-4. **No secrets on disk outside the keychain.** Ever. The v1.1 tool-list disk cache contains tool metadata only, never credentials, and is fully reconstructible.
+4. **No secrets on disk outside the keychain.** Ever. The v1.2 capability
+    cache lives at `{cache_dir}/fanin-mcp/capabilities/<namespace>.json` (or
+    below `FANIN_MCP_CACHE_DIR`) and contains only a format version, namespace,
+    reconstructible effective-ACL/config fingerprint, generation time, and
+    server/tool names and descriptions. It contains no credentials, environment
+    values, headers, schemas, or tool results. It is advisory display metadata,
+    never authorization: `invoke_tool` always checks the live namespace ACL.
+    The namespace cache filename must be a single normal path component
+    (`is_valid_cache_namespace_stem`); otherwise the write is skipped.
 5. **Credential backend chain.** `--credential-store` selects the *preferred* backend (default: keyring); the process environment is always the fallback (headless Linux, CI, containers). Failures state which backend failed and why.
 6. **Process-tree containment.** Every upstream is spawned into a container so tearing down `fanin-mcp` reaps the upstream and (where the platform allows) its descendants — e.g. the `cmd /c npx ...` → `node.exe` / `npx → node` grandchild shape. The guarantee differs by platform, and we state it honestly:
    - **Windows — full whole-tree, crash-safe.** The child is created suspended, assigned to a `KILL_ON_JOB_CLOSE` Job Object, then resumed (closing the spawn-then-assign race). A hard kill of `fanin-mcp` — even `taskkill /F` — makes the kernel reap the *entire* tree, grandchildren included. CI-tested.
@@ -45,6 +53,10 @@ The meta-tool indirection has a consequence users must understand: to the client
 - Use read-only namespaces (allow-list only query/read tools) for sessions that shouldn't mutate anything.
 - Don't put destructive-capable servers in the `default` namespace if you use `default` casually.
 - Where upstreams offer their own hardening (e.g., a Postgres server's read-only mode), use it — defense in depth; the aggregator's ACL is name-level, not argument-level.
+- **Compose namespaces least-privilege first.** `extends` unions server access
+  but intersects tool filters. Unknown parents and cycles fail closed; a child
+  cannot widen a parent restriction, and a disjoint intersection remains
+  present-empty NONE rather than becoming unrestricted.
 - **Beware full-filesystem upstreams.** Some servers expose broad read/write capability beyond their headline tool — e.g. the Morph fast-apply server in `ALL_TOOLS: "true"` mode is a general filesystem read/write/list server, not just `edit_file`. A namespace that looks read-only but contains such a server is *not* read-only. Scope these deliberately: expose only the intended tools via the per-server tool-filter, or run the upstream in its own restricted mode. The aggregator's namespace filter is name-level — it controls which tools are reachable, not what arguments they accept.
 
 Concrete shape of the read-only namespace:
@@ -63,6 +75,10 @@ postgres = ["query", "list_tables"]  # write tools (insert, update, ...) are the
 - **Pin upstream versions.** `npx -y some-server@1.2.3`, never floating latest. An MCP server update is a code-execution event on your machine.
 - **Review what you connect.** Prefer servers with pinned, auditable releases.
 - **Per-server timeouts** (`timeout_secs`) limit how long a misbehaving upstream can hold resources.
+- **Run `fanin-mcp check` before relying on a configuration.** It eagerly
+  connects the selected namespace's allowed upstreams for operator preflight.
+  Check exits through normal cleanup and its per-upstream containment guards
+  leave no upstream orphans.
 - Logs (`--log-file`) record every tool call (server, tool, latency, outcome) — useful as an audit trail; they are redacted but still treat them as sensitive (they reveal activity patterns and tool arguments are upstream-visible by necessity).
 
 ## Supply Chain (project itself)

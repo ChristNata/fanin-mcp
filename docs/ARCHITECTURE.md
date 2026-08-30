@@ -32,12 +32,13 @@ Traffic is bidirectional: downstream requests (tool calls) flow up to upstreams;
 ## Module Structure
 
 ### `main.rs` — Entry point + subcommands
-- Subcommands: *(default: serve)*, `cred set|list|rm`, future: `warm`, `auth`, `install`
+- Subcommands: *(default: serve)*, `cred set|list|rm`, `check`, future: `auth`, `install`
 - Parse CLI args (`--config`, `--namespace`, `--log-level`, `--log-file`, `--credential-store`)
 - Load and validate TOML config (including server-name validation)
 - Initialize credential store
 - Build `Registry` with namespace-filtered server list
-- Create `AggServer`, call `agg_server.serve(stdio()).await`
+- `check` runs preflight and returns an `ExitCode` without calling
+  `serve(stdio())`; only `serve` creates `AggServer` and enters the stdio server
 
 ### `config.rs` — Configuration
 
@@ -83,6 +84,10 @@ tools.postgres = ["query", "list_tables"]  # tool-level filter — the real perm
 [namespaces.research-readonly]            # documented pattern: read-only namespace
 servers = ["postgres"]
 tools.postgres = ["query", "list_tables"]
+
+[namespaces.research-plus]
+extends = ["research"]
+servers = ["obsidian"]
 ```
 
 **Validation at load (fail-fast):**
@@ -90,7 +95,8 @@ tools.postgres = ["query", "list_tables"]
 - Unknown `--namespace` → startup error.
 - Literal-looking secrets in `env`/`headers` values (heuristic) → warning.
 
-**Config resolution:** `--config` → `$FANIN_MCP_CONFIG` → platform default (`%APPDATA%\fanin-mcp\config.toml` / `~/.config/fanin-mcp/config.toml`).
+**Config resolution:** Config-backed `serve` and `check` require `--config`.
+`$FANIN_MCP_CONFIG` and platform default config-path lookup are not implemented.
 
 **Env var interpolation:** `${VAR}` resolved at spawn time: preferred credential backend → process environment → error. `--credential-store` selects the *preferred* backend; env is always the fallback (covers headless Linux without Secret Service).
 
@@ -100,9 +106,13 @@ tools.postgres = ["query", "list_tables"]
 
 Implements `rmcp::ServerHandler`.
 
-**`get_info()`**: name, version, `tools` + `tools.listChanged` capabilities.
+**`get_info()`**: name, version, `tools` + `tools.listChanged` capabilities,
+and an `initialize.instructions` capability ToC when configuration selects an
+effective namespace.
 
-**`list_tools()`** returns exactly 3 meta-tools with **static descriptions** (no upstream contact — see "Description strategy" below):
+**`list_tools()`** returns exactly 3 meta-tools with no upstream contact. Its
+`list_tools` description preserves the static contract prefix and may add a
+per-session capability-ToC suffix (see "Description strategy" below):
 
 1. **`list_tools`** — "Lists the tools available through this aggregator, grouped by server, with one-line descriptions. Call this once to see what's connected; pass `server` to fetch a single server's tools." Input: `{ server?: string }`. Output rows: `{ server, tool, description }` (descriptions sanitized + truncated ~100 chars).
 2. **`get_tool_schema`** — "Get the full input schema for a tool. Format: server__tool (e.g. postgres__query)." Input: `{ name: string }`.
@@ -115,7 +125,15 @@ Implements `rmcp::ServerHandler`.
 4. Forward `tools/call` with **raw `serde_json::Value` arguments — no parsing, validation, or transformation**
 5. Return the upstream result **byte-faithfully**: all content block types (text, image, embedded resource, resource link, structuredContent) pass through with their **values** byte-identical. The JSON envelope is re-serialized by rmcp's typed `CallToolResult` (key order normalized; absent `_meta`/`annotations` may render as `null`) — non-normative, so content fidelity holds. See D-004 for the precise scope of "byte-faithful."
 
-**Description strategy (MVP vs v1.1):** MVP ships static meta-tool descriptions; the per-server `description` config field optionally enriches `list_tools` *results*. This preserves lazy connections — the aggregator never fans out to upstreams at session start. v1.1 adds a reconstructible disk cache of upstream tool lists (keyed by hash of command+args, at the platform cache dir, optionally pre-populated via `fanin-mcp warm`) used to auto-enrich the description. The cache is not authoritative state — deleting it only costs one re-fetch.
+**Description strategy (v1.2):** `initialize.instructions` is the primary
+capability-ToC channel; the `list_tools` description suffix is secondary. Both
+render configured descriptions for the effective namespace without spawning.
+`fanin-mcp check` can eagerly discover allowed upstreams and write a matching
+reconstructible cache at `{cache_dir}/fanin-mcp/capabilities/<namespace>.json`;
+`FANIN_MCP_CACHE_DIR` replaces `cache_dir`. A matching cache may add compact
+tool summaries. It contains no schemas, secrets, credentials, headers, or
+results, and is advisory only: live namespace ACL checks still authorize every
+call.
 
 ### `registry.rs` — Upstream Server Registry
 
@@ -176,6 +194,11 @@ struct Namespace {
 ```
 
 Selected by `--namespace` (default `"default"`); unknown namespace → fail-fast startup error.
+Before `ActiveNamespace` is built, the resolver follows `extends`, unions
+effective servers, and intersects present tool filters fail-closed. An absent
+filter is ALL for intersection identity; a present empty intersection remains
+NONE. The resolved effective ACL drives advertisement, `check`, cache
+fingerprinting, and live authorization.
 
 ### `credentials.rs` — Credential Store + Subcommands
 
@@ -248,7 +271,9 @@ Config file (servers, namespaces, timeouts, descriptions)
 OS keychain (preferred backend) → process env (fallback)
 ```
 
-No database. No authoritative persistent state beyond config + keychain. (v1.1 adds a *reconstructible* tool-list cache — deleting it is always safe.)
+No database. No authoritative persistent state beyond config + keychain. The
+v1.2 capability cache is reconstructible advisory metadata; deleting it is
+always safe.
 
 ## Dependencies (Cargo.toml)
 
@@ -269,8 +294,8 @@ CI: 3-OS matrix (Windows/macOS/Linux), `cargo deny` (bans/licenses/sources; advi
 
 ## Platform Considerations
 
-- **Windows (primary):** `cmd /c` wrapper for npm servers, **inside a Job Object** (kill-on-close) — the wrapper alone orphans `node.exe`. DPAPI keychain. `%APPDATA%\fanin-mcp\config.toml`.
-- **macOS / Linux:** direct exec in a fresh process group. Keychain / Secret Service; env fallback covers headless Linux. `~/.config/fanin-mcp/config.toml`.
+- **Windows (primary):** `cmd /c` wrapper for npm servers, **inside a Job Object** (kill-on-close) — the wrapper alone orphans `node.exe`. DPAPI keychain. `%APPDATA%\fanin-mcp\config.toml` is a conventional location an operator may pass via `--config`; it is not auto-resolved.
+- **macOS / Linux:** direct exec in a fresh process group. Keychain / Secret Service; env fallback covers headless Linux. `~/.config/fanin-mcp/config.toml` is likewise a conventional `--config` location, not an auto-resolved default.
 - All three OSes are release targets and CI-tested from day one.
 
 ## What This Architecture Is NOT

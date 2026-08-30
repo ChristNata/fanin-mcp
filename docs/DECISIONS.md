@@ -27,6 +27,14 @@ All entries below: **Status: Accepted · Date: 2026-06** (initial design review)
 **Rejected:** Eager fan-out (the contradiction); hand-written summaries as the *only* mechanism (kept as optional field); cache-in-MVP (deferred — not needed to ship).
 **Revisit:** v1.1 cache design. Amended principle: no *authoritative* persistent state; reconstructible caches are permitted.
 
+**Status note (2026-08-30, v1.2.0):** The static `LIST_TOOLS_DESC` prefix
+remains the SemVer-major contract. A per-session capability ToC suffix on
+`list_tools` and `initialize.instructions` are additive. The reconstructible
+capability cache is advisory only and never authorizes a call. The original
+claims that `description` enriches `list_tools` results and that auto-generated
+descriptions return in v1.1 are superseded by D-021/D-022: results remain live
+inventory, and the cache shipped as `fanin-mcp check` in v1.2.
+
 ## D-004 — Raw argument passthrough; byte-faithful results
 
 **Decision:** `invoke_tool` arguments pass to upstreams as raw `serde_json::Value` — never parsed, validated, or transformed. Results (all content block types) return unmodified.
@@ -140,3 +148,60 @@ All entries below: **Status: Accepted · Date: 2026-06** (initial design review)
 **Rejected:** Unconditional forwarding (ignores capability negotiation — D-008 rejected it and this still applies); a separate elicitation timeout independent of the tool-call budget (two clocks racing); default-accept on failure (security-inverted).
 **References:** D-004 (verbatim relay), D-005 (errors stay in-conversation; the no-capability / timeout arm returns the existing structured rejection, not a JSON-RPC error), D-007 (peer captured via a brief lock-clone-drop, never held across the upstream call — GOTCHA #16), D-008 (the umbrella ADR this slices), GOTCHA #1 (stdout stays clean — all of this logs to stderr/file), GOTCHA #2 (no upstream request goes unanswered).
 **Deferred:** sampling (`create_message`) and roots (`list_roots`) forwarding — same capability-mirrored shape, planned for a later v1.1 slice.
+
+## D-021 — Config-only capability advertisement through instructions and a suffix
+
+**Status: Accepted · Date: 2026-08-30 (v1.2.0)**
+
+**Decision:** Advertise the effective namespace's configured capabilities in
+`initialize.instructions` as the primary channel and in a per-session
+`list_tools` description suffix as the secondary channel. Both channels read
+only config and the advisory cache; neither connects to an upstream.
+**Why:** `instructions` gives clients an immediate ToC, while the suffix is a
+reliable fallback for clients that surface tool descriptions but not
+instructions. Config-only rendering preserves lazy serve startup.
+**Rejected:** Upstream inventory during initialize or protocol `tools/list` —
+that fan-out violates D-003 and turns session startup into an availability
+dependency.
+
+## D-022 — `check` preflight and reconstructible advisory capability cache
+
+**Status: Accepted · Date: 2026-08-30 (v1.2.0)**
+
+**Decision:** `fanin-mcp check` eagerly connects only servers allowed by the
+resolved namespace and writes a reconstructible non-secret capability cache
+after successful full-namespace checks. The cache fingerprint includes the
+resolved effective namespace and ACL, and it is advisory only.
+**Why:** Operators need an explicit availability proof without making normal
+serve startup eager. The cache makes prior discovery available for compact
+advertisement, but it cannot be trusted as live state.
+**Rejected:** A cache that authorizes calls, stores schemas, results, headers,
+environment, or credentials, or substitutes for live `is_tool_allowed`.
+
+## D-023 — Composable namespaces use fail-closed least-privilege intersection
+
+**Status: Accepted · Date: 2026-08-30 (v1.2.0)**
+
+**Decision:** Namespaces may `extends` one or more parents. Effective servers
+are unioned; tool filters intersect restrictively. An absent filter is ALL as
+the intersection identity, while an empty intersection remains a present-empty
+NONE filter.
+**Why:** Reusable namespace roles need composition without permitting a child
+or sibling to regain tools a parent removed. Retaining empty filters prevents
+the absent-key ALL representation from becoming a fail-open path.
+**Rejected:** Override or union semantics for tool filters, silent unknown
+parents, cycle acceptance, and raw-child-only validation.
+
+## D-024 — Check containment uses per-upstream lifetime guards
+
+**Status: Accepted · Date: 2026-08-30 (v1.2.0)**
+
+**Decision:** The outer current-process-tree guard remains Serve-only. Every
+Windows upstream uses `KillOnDrop` together with its Job Object, so a `check`
+spawn-then-exit path drops and kills its upstream tree without installing the
+Serve outer guard.
+**Why:** Applying the outer guard to Check can preempt its graceful `ExitCode`
+return and skip the normal drop path. Per-upstream containment protects the
+actual Check lifecycle and preserves D-009's no-orphan guarantee.
+**Rejected:** Reusing the Serve-only outer guard for Check or relying on a
+direct-child-only kill path.

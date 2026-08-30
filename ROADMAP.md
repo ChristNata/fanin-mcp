@@ -24,15 +24,25 @@ The shippable core. Full plan in [MVP.md](docs/MVP.md); requirements in [PRD.md]
 
 Roughly ordered by expected impact:
 
-1. **Cached auto-generated `list_tools` description.** Reconstructible disk cache of upstream tool inventories (keyed by command+args hash) + `warm` subcommand. Restores the "LLM knows what's connected without a round-trip" UX without violating lazy startup.
-2. **Capability-mirrored forwarding — partial (elicitation shipped; sampling + roots planned).** Mirror the downstream client's declared capabilities to upstreams and forward declared-capability requests downstream, relaying responses. **Elicitation forwarding shipped in v1.1.0** — capability-gated (forwards iff the client declared it), default-deny lifecycle (timeout/disconnect/cancel → non-accept, never accept; D-020). **Sampling (`create_message`) and roots (`list_roots`) forwarding remain planned** for a later v1.1 slice; both are still rejected/empty today.
-3. **Native remote-HTTPS Streamable-HTTP upstreams.** v1.0 ships Streamable-HTTP for loopback `http://` only; no TLS backend is linked. Remote/HTTPS upstreams are reached via stdio/npx today. Planned: enable reqwest `rustls-tls` for native remote HTTPS.
-4. **OAuth 2.1 for remote upstreams.** Out-of-band `fanin-mcp auth <server>` subcommand: browser flow, PKCE, token storage in the existing credential store, refresh handling. Unlocks Linear, Notion, Atlassian, Sentry and other OAuth-only remotes.
-5. **`install` subcommand.** `fanin-mcp install --client <claude|opencode> --namespace <id>` writes the correct entry into each CLI's config. The adoption lever for "every major CLI" — each new client becomes a small adapter here instead of a docs page.
-6. **`list_server_status` meta-tool.** Connectivity + last-error per upstream so the LLM can self-diagnose.
-7. **`tools/list_changed` push.** Re-fetch on upstream change notification, push to client (requires verifying client refetch behavior).
-8. **Per-server `readonly = true`.** Reject calls to tools whose upstream annotations aren't read-only — namespace ACL's enforcement-grade sibling.
-9. **Progress-based idle timeout + progress forwarding.** Reset the per-call clock on upstream `notifications/progress`; relay progress downstream.
+1. **Capability-mirrored forwarding — partial (elicitation shipped; sampling + roots planned).** Mirror the downstream client's declared capabilities to upstreams and forward declared-capability requests downstream, relaying responses. **Elicitation forwarding shipped in v1.1.0** — capability-gated (forwards iff the client declared it), default-deny lifecycle (timeout/disconnect/cancel → non-accept, never accept; D-020). **Sampling (`create_message`) and roots (`list_roots`) forwarding remain planned** for a later v1.1 slice; both are still rejected/empty today.
+2. **Native remote-HTTPS Streamable-HTTP upstreams.** v1.0 ships Streamable-HTTP for loopback `http://` only; no TLS backend is linked. Remote/HTTPS upstreams are reached via stdio/npx today. Planned: enable reqwest `rustls-tls` for native remote HTTPS.
+3. **OAuth 2.1 for remote upstreams.** Out-of-band `fanin-mcp auth <server>` subcommand: browser flow, PKCE, token storage in the existing credential store, refresh handling. Unlocks Linear, Notion, Atlassian, Sentry and other OAuth-only remotes.
+4. **`install` subcommand.** `fanin-mcp install --client <claude|opencode> --namespace <id>` writes the correct entry into each CLI's config. The adoption lever for "every major CLI" — each new client becomes a small adapter here instead of a docs page.
+5. **`list_server_status` meta-tool.** Connectivity + last-error per upstream so the LLM can self-diagnose.
+6. **`tools/list_changed` push.** Re-fetch on upstream change notification, push to client (requires verifying client refetch behavior).
+7. **Per-server `readonly = true`.** Reject calls to tools whose upstream annotations aren't read-only — namespace ACL's enforcement-grade sibling.
+8. **Progress-based idle timeout + progress forwarding.** Reset the per-call clock on upstream `notifications/progress`; relay progress downstream.
+
+## v1.2 — Capability Discovery (✅ released)
+
+- **Capability advertisement.** Config-only capability ToC through
+  `initialize.instructions` with a `list_tools` description suffix fallback;
+  neither path spawns an upstream.
+- **`fanin-mcp check` + advisory capability cache.** Eager operator preflight
+  writes a reconstructible, non-secret cache for advertisement only; it never
+  authorizes calls.
+- **Composable namespaces.** `extends` composes server sets and intersects
+  tool filters fail-closed, including present-empty NONE intersections.
 
 ## v1.2+ — Breadth (💭)
 
