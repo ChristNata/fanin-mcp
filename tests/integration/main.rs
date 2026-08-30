@@ -27,6 +27,7 @@ mod error;
 
 mod advertisement;
 mod aggregator;
+mod check;
 mod config;
 mod cred_store;
 mod discovery;
