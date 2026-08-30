@@ -8,6 +8,7 @@
 //! for death after `check` returns.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -132,7 +133,11 @@ fn assert_check_command_recognized(output: &common::CliOutput) {
 }
 
 async fn run_check(args: &[String]) -> common::CliOutput {
-    let output = common::run_fanin_cli(args, None, CHECK_DEADLINE).await;
+    run_check_with_env(args, &[]).await
+}
+
+async fn run_check_with_env(args: &[String], child_env: &[(&str, &OsStr)]) -> common::CliOutput {
+    let output = common::run_fanin_cli_with_env(args, None, CHECK_DEADLINE, child_env).await;
     assert_check_command_recognized(&output);
     assert!(
         output.status.is_some(),
@@ -388,7 +393,6 @@ async fn check_json_ok_on_healthy_namespace() {
 #[tokio::test]
 async fn check_fails_on_missing_credential() {
     let key = fx::phase3_env_var_name("CHECK_MISSING");
-    std::env::remove_var(&key);
     let server = "missing-cred";
     let config = fx::Phase3ConfigBuilder::new()
         .server(fx::Phase3ServerEntry::new(server).env("TOKEN", format!("${{{key}}}")))
@@ -649,14 +653,6 @@ async fn check_tools_list_timeout_returns_without_hanging() {
 async fn check_json_and_logs_do_not_leak_resolved_secret() {
     let key = fx::phase3_env_var_name("CHECK_SECRET");
     let sentinel = fx::phase3_sentinel_value();
-    std::env::set_var(&key, &sentinel);
-    struct RemoveEnv(String);
-    impl Drop for RemoveEnv {
-        fn drop(&mut self) {
-            std::env::remove_var(&self.0);
-        }
-    }
-    let _remove = RemoveEnv(key.clone());
 
     let global_log = fx::empty_log_file_path();
     let server_log = fx::empty_log_file_path();
@@ -668,7 +664,7 @@ async fn check_json_and_logs_do_not_leak_resolved_secret() {
     ));
     let mut args = check_args(Some(&config.path_str()), None, Some(&global_log), &[]);
     args.splice(0..0, ["--credential-store".to_string(), "env".to_string()]);
-    let output = run_check(&args).await;
+    let output = run_check_with_env(&args, &[(key.as_str(), OsStr::new(&sentinel))]).await;
     assert!(
         output.status.is_some_and(|status| status.success()),
         "secret resolution is valid and check should succeed: {}",

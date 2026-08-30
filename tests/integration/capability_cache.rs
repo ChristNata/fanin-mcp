@@ -2,13 +2,15 @@
 
 //! Phase B2 reconstructible capability-cache contract.
 //!
-//! Every test installs a unique `FANIN_MCP_CACHE_DIR` before spawning a child.
-//! `nextest` runs each test in its own process, so the process environment is
-//! isolated as well as the on-disk cache. All cache reads and writes are made
-//! through the required `<override>/fanin-mcp/capabilities/<namespace>.json`
-//! path; the real user cache is never touched.
+//! Every spawned child receives a unique `FANIN_MCP_CACHE_DIR` through its own
+//! `Command` environment. The parent test process is never mutated, so both
+//! thread-per-test `cargo test` and process-per-test nextest remain race-free.
+//! All cache reads and writes use the required
+//! `<override>/fanin-mcp/capabilities/<namespace>.json` path; the real user
+//! cache is never touched.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -27,6 +29,7 @@ const SERVER: &str = "probe";
 const ALLOWED_TOOL: &str = "echo_ok";
 const DENIED_TOOL: &str = "dangerous_noop";
 const ALLOWED_SUMMARY: &str = "Echoes the supplied input back in a successful tool result.";
+const CACHE_DIR_ENV: &str = "FANIN_MCP_CACHE_DIR";
 
 struct IsolatedCache {
     _temp: TempDir,
@@ -37,13 +40,11 @@ impl IsolatedCache {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("create isolated B2 cache directory");
         let root = temp.path().to_path_buf();
-        std::env::set_var("FANIN_MCP_CACHE_DIR", &root);
-        assert_eq!(
-            std::env::var_os("FANIN_MCP_CACHE_DIR").as_deref(),
-            Some(root.as_os_str()),
-            "every B2 cache child must inherit its test's unique cache override"
-        );
         Self { _temp: temp, root }
+    }
+
+    fn child_env(&self) -> (&'static str, &OsStr) {
+        (CACHE_DIR_ENV, self.root.as_os_str())
     }
 
     fn path(&self) -> PathBuf {
@@ -224,12 +225,21 @@ fn check_args(config: &fx::ConfigFile, extra: &[&str], env_store: bool) -> Vec<S
 }
 
 async fn run_successful_check(
+    cache: &IsolatedCache,
     config: &fx::ConfigFile,
     extra: &[&str],
     env_store: bool,
+    extra_child_env: &[(&str, &OsStr)],
 ) -> common::CliOutput {
-    let output =
-        common::run_fanin_cli(&check_args(config, extra, env_store), None, CHECK_DEADLINE).await;
+    let mut child_env = vec![cache.child_env()];
+    child_env.extend_from_slice(extra_child_env);
+    let output = common::run_fanin_cli_with_env(
+        &check_args(config, extra, env_store),
+        None,
+        CHECK_DEADLINE,
+        &child_env,
+    )
+    .await;
     assert!(
         output.status.is_some_and(|status| status.success()),
         "B2 cache precondition: healthy check must succeed; stdout: {:?}; stderr: {:?}",
@@ -409,8 +419,13 @@ fn list_tools_description(response: &Value) -> &str {
         .unwrap_or_else(|| panic!("protocol tools/list must describe list_tools: {response:?}"))
 }
 
-async fn advertisement(config: &fx::ConfigFile) -> (String, String) {
-    let mut child = common::spawn_fanin_with_config(&config.path_str(), Some(NAMESPACE)).await;
+async fn advertisement(cache: &IsolatedCache, config: &fx::ConfigFile) -> (String, String) {
+    let mut child = common::spawn_fanin_with_config_and_env(
+        &config.path_str(),
+        Some(NAMESPACE),
+        &[cache.child_env()],
+    )
+    .await;
     let init = common::initialize(&mut child).await;
     let instructions = init
         .get("instructions")
@@ -465,7 +480,7 @@ async fn successful_check_writes_required_cache_shape_without_sensitive_material
         Some(env_marker),
     );
 
-    run_successful_check(&config, &[], false).await;
+    run_successful_check(&cache, &config, &[], false, &[]).await;
     let body = read_cache(&cache);
     assert_required_cache_shape(&body);
     let serialized = serde_json::to_string(&body).unwrap();
@@ -482,7 +497,7 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
     let stable_description = "Current config-only fallback description";
 
     let baseline = stdio_config(&probe, &[], stable_description, &[ALLOWED_TOOL], None, &[]);
-    run_successful_check(&baseline, &[], false).await;
+    run_successful_check(&cache, &baseline, &[], false, &[]).await;
     read_cache(&cache);
     let changed_command = stdio_config(
         "definitely-different-command-for-fingerprint",
@@ -492,9 +507,9 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
         None,
         &[],
     );
-    assert_cache_miss_advertisement("command", &changed_command, stable_description).await;
+    assert_cache_miss_advertisement(&cache, "command", &changed_command, stable_description).await;
 
-    run_successful_check(&baseline, &[], false).await;
+    run_successful_check(&cache, &baseline, &[], false, &[]).await;
     let changed_args = stdio_config(
         &probe,
         &["--fingerprint-change"],
@@ -503,20 +518,21 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
         None,
         &[],
     );
-    assert_cache_miss_advertisement("args", &changed_args, stable_description).await;
+    assert_cache_miss_advertisement(&cache, "args", &changed_args, stable_description).await;
 
     let endpoint = start_http_probe().await;
     let http_baseline = http_config(&endpoint, stable_description, None, None);
-    run_successful_check(&http_baseline, &[], false).await;
+    run_successful_check(&cache, &http_baseline, &[], false, &[]).await;
     let changed_endpoint = http_config(
         "http://127.0.0.1:9/fingerprint-change",
         stable_description,
         None,
         None,
     );
-    assert_cache_miss_advertisement("endpoint", &changed_endpoint, stable_description).await;
+    assert_cache_miss_advertisement(&cache, "endpoint", &changed_endpoint, stable_description)
+        .await;
 
-    run_successful_check(&baseline, &[], false).await;
+    run_successful_check(&cache, &baseline, &[], false, &[]).await;
     let mut acl_cache = read_cache(&cache);
     append_cached_tool(
         &mut acl_cache,
@@ -525,9 +541,9 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
     );
     write_cache(&cache, &acl_cache);
     let changed_acl = stdio_config(&probe, &[], stable_description, &[DENIED_TOOL], None, &[]);
-    assert_cache_miss_advertisement("ACL", &changed_acl, stable_description).await;
+    assert_cache_miss_advertisement(&cache, "ACL", &changed_acl, stable_description).await;
 
-    run_successful_check(&baseline, &[], false).await;
+    run_successful_check(&cache, &baseline, &[], false, &[]).await;
     let changed_description_text = "Changed description must invalidate cache";
     let changed_description = stdio_config(
         &probe,
@@ -538,6 +554,7 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
         &[],
     );
     assert_cache_miss_advertisement(
+        &cache,
         "description",
         &changed_description,
         changed_description_text,
@@ -546,11 +563,12 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
 }
 
 async fn assert_cache_miss_advertisement(
+    cache: &IsolatedCache,
     changed_field: &str,
     config: &fx::ConfigFile,
     current_description: &str,
 ) {
-    let (instructions, list_description) = advertisement(config).await;
+    let (instructions, list_description) = advertisement(cache, config).await;
     let combined = format!("{instructions}\n{list_description}");
     assert!(
         combined.contains(current_description),
@@ -578,10 +596,10 @@ async fn valid_cache_enriches_advertisement_with_allowed_summaries_only() {
         None,
         &[],
     );
-    run_successful_check(&config, &[], false).await;
+    run_successful_check(&cache, &config, &[], false, &[]).await;
     read_cache(&cache);
 
-    let (instructions, list_description) = advertisement(&config).await;
+    let (instructions, list_description) = advertisement(&cache, &config).await;
     let combined = format!("{instructions}\n{list_description}");
     assert!(
         combined.contains(ALLOWED_TOOL) && combined.contains(ALLOWED_SUMMARY),
@@ -612,7 +630,7 @@ async fn cache_cannot_authorize_namespace_denied_invoke() {
         Some(&log),
         &[],
     );
-    run_successful_check(&config, &[], false).await;
+    run_successful_check(&cache, &config, &[], false, &[]).await;
     let mut body = read_cache(&cache);
     append_cached_tool(
         &mut body,
@@ -622,7 +640,12 @@ async fn cache_cannot_authorize_namespace_denied_invoke() {
     write_cache(&cache, &body);
     std::fs::write(&log, "").expect("clear baseline check child log");
 
-    let mut child = common::spawn_fanin_with_config(&config.path_str(), Some(NAMESPACE)).await;
+    let mut child = common::spawn_fanin_with_config_and_env(
+        &config.path_str(),
+        Some(NAMESPACE),
+        &[cache.child_env()],
+    )
+    .await;
     let init = common::initialize(&mut child).await;
     let protocol_list = common::list_tools(&mut child).await;
     common::assert_no_rpc_error(&protocol_list, "cache-not-auth protocol tools/list");
@@ -679,11 +702,11 @@ async fn no_cache_write_suppresses_an_otherwise_working_write() {
         None,
         &[],
     );
-    run_successful_check(&config, &[], false).await;
+    run_successful_check(&cache, &config, &[], false, &[]).await;
     read_cache(&cache);
     std::fs::remove_file(cache.path()).expect("remove positive-control cache file");
 
-    run_successful_check(&config, &["--no-cache-write"], false).await;
+    run_successful_check(&cache, &config, &["--no-cache-write"], false, &[]).await;
     let path = cache.path();
     cache.assert_expected_path(&path);
     assert!(
@@ -703,7 +726,7 @@ async fn refresh_cache_replaces_stale_file_after_success() {
         None,
         &[],
     );
-    run_successful_check(&config, &[], false).await;
+    run_successful_check(&cache, &config, &[], false, &[]).await;
     read_cache(&cache);
     let stale = serde_json::json!({
         "format_version": 999,
@@ -714,7 +737,7 @@ async fn refresh_cache_replaces_stale_file_after_success() {
     });
     write_cache(&cache, &stale);
 
-    run_successful_check(&config, &["--refresh-cache"], false).await;
+    run_successful_check(&cache, &config, &["--refresh-cache"], false, &[]).await;
     let refreshed = read_cache(&cache);
     assert_ne!(
         refreshed, stale,
@@ -728,14 +751,6 @@ async fn credential_secret_is_absent_from_cache_and_json_stdout() {
     let cache = IsolatedCache::new();
     let key = fx::phase3_env_var_name("B2_CACHE_SECRET");
     let sentinel = fx::phase3_sentinel_value();
-    std::env::set_var(&key, &sentinel);
-    struct RemoveEnv(String);
-    impl Drop for RemoveEnv {
-        fn drop(&mut self) {
-            std::env::remove_var(&self.0);
-        }
-    }
-    let _remove = RemoveEnv(key.clone());
     let placeholder = format!("${{{key}}}");
     let config = stdio_config(
         &fx::probe_bin_path(),
@@ -746,7 +761,14 @@ async fn credential_secret_is_absent_from_cache_and_json_stdout() {
         &[("TOKEN", &placeholder)],
     );
 
-    let output = run_successful_check(&config, &[], true).await;
+    let output = run_successful_check(
+        &cache,
+        &config,
+        &[],
+        true,
+        &[(key.as_str(), OsStr::new(&sentinel))],
+    )
+    .await;
     let body = read_cache(&cache);
     let cache_text = serde_json::to_string(&body).unwrap();
     assert!(

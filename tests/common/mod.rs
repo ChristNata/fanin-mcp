@@ -10,6 +10,7 @@
 //! kills the child on drop so no orphaned processes survive a failed test.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -372,6 +373,17 @@ pub async fn spawn_path(path: String) -> JsonRpcChild {
 /// `config_path` is passed verbatim to `--config`; the caller is responsible
 /// for keeping the temp config file alive (see `fixtures::ConfigFile`).
 pub async fn spawn_fanin_with_config(config_path: &str, namespace: Option<&str>) -> JsonRpcChild {
+    spawn_fanin_with_config_and_env(config_path, namespace, &[]).await
+}
+
+/// Spawn a config-backed `fanin-mcp` child with environment entries scoped to
+/// that child only. This avoids mutating process-global environment state when
+/// integration tests run concurrently in one `cargo test` process.
+pub async fn spawn_fanin_with_config_and_env(
+    config_path: &str,
+    namespace: Option<&str>,
+    child_env: &[(&str, &OsStr)],
+) -> JsonRpcChild {
     let mut extra: Vec<String> = Vec::new();
     extra.push("--config".to_string());
     extra.push(config_path.to_string());
@@ -379,7 +391,7 @@ pub async fn spawn_fanin_with_config(config_path: &str, namespace: Option<&str>)
         extra.push("--namespace".to_string());
         extra.push(ns.to_string());
     }
-    spawn_fanin_with_args(&extra).await
+    spawn_fanin_with_args_and_env(&extra, child_env).await
 }
 
 /// Spawn `fanin-mcp` with an explicit argv tail (after the bin name). Used by
@@ -387,9 +399,18 @@ pub async fn spawn_fanin_with_config(config_path: &str, namespace: Option<&str>)
 /// process to exit BEFORE serving — those tests do not need a JSON-RPC
 /// connection, just the exit status and a clean-stdout observation.
 pub async fn spawn_fanin_with_args(args: &[String]) -> JsonRpcChild {
+    spawn_fanin_with_args_and_env(args, &[]).await
+}
+
+/// Spawn `fanin-mcp` with an explicit argv tail and child-scoped environment.
+pub async fn spawn_fanin_with_args_and_env(
+    args: &[String],
+    child_env: &[(&str, &OsStr)],
+) -> JsonRpcChild {
     let path = env!("CARGO_BIN_EXE_fanin-mcp").to_string();
     let mut cmd = Command::new(&path);
     cmd.args(args);
+    cmd.envs(child_env.iter().copied());
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -536,9 +557,21 @@ pub async fn run_fanin_cli(
     stdin_payload: Option<&str>,
     deadline: Duration,
 ) -> CliOutput {
+    run_fanin_cli_with_env(args, stdin_payload, deadline, &[]).await
+}
+
+/// Run a bounded CLI child with environment entries scoped to that child.
+/// The parent test process environment remains untouched and thread-safe.
+pub async fn run_fanin_cli_with_env(
+    args: &[String],
+    stdin_payload: Option<&str>,
+    deadline: Duration,
+    child_env: &[(&str, &OsStr)],
+) -> CliOutput {
     let path = env!("CARGO_BIN_EXE_fanin-mcp").to_string();
     let mut cmd = Command::new(&path);
     cmd.args(args);
+    cmd.envs(child_env.iter().copied());
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

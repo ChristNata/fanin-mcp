@@ -541,7 +541,7 @@ async fn check_rejects_missing_tool_inherited_from_parent() {
 #[tokio::test]
 async fn parent_tool_filter_change_invalidates_child_capability_cache() {
     let cache_root = tempfile::tempdir().expect("create isolated inherited-filter cache directory");
-    std::env::set_var("FANIN_MCP_CACHE_DIR", cache_root.path());
+    let cache_env = [("FANIN_MCP_CACHE_DIR", cache_root.path().as_os_str())];
 
     let baseline = inherited_filter_config(&["echo_ok"]);
     let check_args = vec![
@@ -552,7 +552,7 @@ async fn parent_tool_filter_change_invalidates_child_capability_cache() {
         "check".to_string(),
         "--json".to_string(),
     ];
-    let check = common::run_fanin_cli(&check_args, None, CHECK_DEADLINE).await;
+    let check = common::run_fanin_cli_with_env(&check_args, None, CHECK_DEADLINE, &cache_env).await;
     assert!(
         check.status.is_some_and(|status| status.success()),
         "cache precondition: full check over the inherited filter must succeed; stdout: {:?}; stderr: {:?}",
@@ -573,8 +573,12 @@ async fn parent_tool_filter_change_invalidates_child_capability_cache() {
     // This is the only semantic config change: the parent's inherited filter
     // broadens from one live tool to two. The child still has no local filter.
     let changed_parent = inherited_filter_config(&["echo_ok", "dangerous_noop"]);
-    let mut child =
-        common::spawn_fanin_with_config(&changed_parent.path_str(), Some("reviewer")).await;
+    let mut child = common::spawn_fanin_with_config_and_env(
+        &changed_parent.path_str(),
+        Some("reviewer"),
+        &cache_env,
+    )
+    .await;
     let init = common::initialize(&mut child).await;
     let protocol_list = common::list_tools(&mut child).await;
     common::assert_no_rpc_error(
