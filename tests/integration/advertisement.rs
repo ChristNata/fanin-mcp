@@ -5,7 +5,6 @@
 //! initialize nor protocol `tools/list` may spawn an upstream. The distinct
 //! `list_tools` meta-tool call remains the lazy inventory boundary (N1).
 
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -89,68 +88,15 @@ fn list_tools_inventory_rows(response: &Value) -> Vec<Value> {
         .unwrap_or_else(|error| panic!("list_tools inventory must be a JSON row array: {error}"))
 }
 
-#[cfg(windows)]
-fn probe_child_pids(parent_pid: u32) -> Vec<u32> {
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"ParentProcessId = {parent_pid}\" | Where-Object {{ $_.Name -like 'probe-server*' }} | ForEach-Object {{ $_.ProcessId }}"
-    );
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("PowerShell process query must run for the no-spawn PID oracle");
-    assert!(
-        output.status.success(),
-        "PowerShell process query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
-}
-
-#[cfg(unix)]
-fn probe_child_pids(parent_pid: u32) -> Vec<u32> {
-    let output = Command::new("ps")
-        .args(["-eo", "pid=,ppid=,comm="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("ps process query must run for the no-spawn PID oracle");
-    assert!(
-        output.status.success(),
-        "ps process query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse::<u32>().ok()?;
-            let ppid = fields.next()?.parse::<u32>().ok()?;
-            let command = fields.next()?;
-            (ppid == parent_pid && command.starts_with("probe-server")).then_some(pid)
-        })
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn probe_child_pids(_parent_pid: u32) -> Vec<u32> {
-    panic!("no-spawn PID oracle is unsupported on this platform")
-}
-
-async fn wait_for_probe_children(parent_pid: u32, minimum: usize) -> Vec<u32> {
+async fn wait_for_child_log_line(server: &ServerFixture) -> String {
+    let marker = format!("[{}]", server.name);
     let started = Instant::now();
     loop {
-        let pids = probe_child_pids(parent_pid);
-        // Process enumeration can be CPU-starved under full nextest load; this
-        // setup margin does not change the zero-upstream assertion.
-        if pids.len() >= minimum || started.elapsed() >= Duration::from_secs(12) {
-            return pids;
+        let log = std::fs::read_to_string(&server.log_path).unwrap_or_default();
+        if log.contains(&marker) || started.elapsed() >= Duration::from_secs(3) {
+            return log;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -190,12 +136,11 @@ async fn initialize_advertises_only_allowed_servers_with_config_descriptions() {
 
 /// A2.2 / CA-002 and A2.6 / N1: initialize plus protocol `tools/list` writes
 /// no child-log prefix. The `list_tools` meta-tool then returns real inventory
-/// and creates probe PIDs/log lines in the same session.
+/// and creates allowed-server child-log lines in the same session.
 #[tokio::test]
 async fn initialize_and_protocol_tools_list_do_not_spawn_but_meta_list_tools_does() {
     let (cfg, servers) = advertisement_config();
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
-    let fanin_pid = child.process_id();
 
     common::initialize(&mut child).await;
     let protocol_list = common::list_tools(&mut child).await;
@@ -222,17 +167,12 @@ async fn initialize_and_protocol_tools_list_do_not_spawn_but_meta_list_tools_doe
         "list_tools meta-tool must reach inventory and return upstream rows"
     );
 
-    let pids_after = wait_for_probe_children(fanin_pid, ALLOWED.len()).await;
-    assert!(
-        pids_after.len() >= ALLOWED.len(),
-        "list_tools meta-tool must cross the lazy inventory boundary and spawn the two allowed probes; found PIDs {pids_after:?}"
-    );
     for server in servers.iter().filter(|server| {
         ALLOWED
             .iter()
             .any(|(allowed_name, _)| *allowed_name == server.name)
     }) {
-        let log = std::fs::read_to_string(&server.log_path).unwrap_or_default();
+        let log = wait_for_child_log_line(server).await;
         assert!(
             log.contains(&format!("[{}]", server.name)),
             "list_tools meta-tool must inventory {} and produce a child log line; log: {log}",

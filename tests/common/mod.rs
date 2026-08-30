@@ -128,14 +128,6 @@ pub struct JsonRpcChild {
 }
 
 impl JsonRpcChild {
-    /// Return the spawned process id for process-tree side-effect assertions.
-    pub fn process_id(&self) -> u32 {
-        self.child
-            .child
-            .id()
-            .expect("spawned JSON-RPC child must have a process id")
-    }
-
     /// Send a JSON-RPC request and await the matching response (by id).
     /// Fails the test on hang (RPC_DEADLINE) or on a non-matching id.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
