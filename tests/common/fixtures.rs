@@ -318,6 +318,9 @@ impl ServerEntry {
 pub struct NamespaceEntry {
     /// The `[namespaces.<name>]` key.
     pub name: String,
+    /// Parent namespaces composed into this namespace (`extends = [...]`).
+    /// An omitted/empty list preserves the pre-C1 fixture shape.
+    pub extends: Vec<String>,
     /// The server allow-list (`servers = [...]`).
     pub servers: Vec<String>,
     /// Per-server tool allow-lists. `tools.<server> = ["tool", ...]`. A server
@@ -328,6 +331,17 @@ pub struct NamespaceEntry {
 }
 
 impl NamespaceEntry {
+    /// A namespace with no local servers. C1 composition fixtures use this for
+    /// children whose entire server set is inherited through `extends`.
+    pub fn empty(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            extends: Vec::new(),
+            servers: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
     /// A namespace with a server allow-list and no tool filters (all tools on
     /// each allowed server are visible).
     pub fn new(
@@ -336,9 +350,16 @@ impl NamespaceEntry {
     ) -> Self {
         Self {
             name: name.into(),
+            extends: Vec::new(),
             servers: servers.into_iter().map(|s| s.into()).collect(),
             tools: Vec::new(),
         }
+    }
+
+    /// Compose one or more named parent namespaces into this namespace.
+    pub fn with_extends(mut self, parents: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.extends = parents.into_iter().map(|parent| parent.into()).collect();
+        self
     }
 
     /// Add a per-server tool allow-list for `server`. The server must also be
@@ -422,6 +443,14 @@ impl MultiConfigBuilder {
 
         for ns in &self.namespaces {
             s.push_str(&format!("[namespaces.{}]\n", ns.name));
+            if !ns.extends.is_empty() {
+                let quoted: Vec<String> = ns
+                    .extends
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect();
+                s.push_str(&format!("extends = [{}]\n", quoted.join(", ")));
+            }
             let quoted: Vec<String> = ns.servers.iter().map(|n| format!("\"{n}\"")).collect();
             s.push_str(&format!("servers = [{}]\n", quoted.join(", ")));
             // Per-server tool allow-lists. The resolved Open Question #1
@@ -633,6 +662,14 @@ impl Phase3ConfigBuilder {
 
         for ns in &self.namespaces {
             s.push_str(&format!("[namespaces.{}]\n", ns.name));
+            if !ns.extends.is_empty() {
+                let quoted: Vec<String> = ns
+                    .extends
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect();
+                s.push_str(&format!("extends = [{}]\n", quoted.join(", ")));
+            }
             let quoted: Vec<String> = ns.servers.iter().map(|n| format!("\"{n}\"")).collect();
             s.push_str(&format!("servers = [{}]\n", quoted.join(", ")));
             if !ns.tools.is_empty() {

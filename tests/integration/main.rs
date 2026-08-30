@@ -41,6 +41,7 @@ mod literal_header_redaction;
 mod manual_e2e;
 mod multi_upstream;
 mod namespace_acl;
+mod namespace_compose;
 mod observability;
 mod phase4_guard;
 mod pinning;
