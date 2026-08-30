@@ -5,6 +5,7 @@
 //! to a **stderr** writer before serving starts so diagnostics never corrupt
 //! the JSON-RPC stream.
 
+mod check;
 mod config;
 mod credentials;
 mod error;
@@ -80,6 +81,22 @@ struct Cli {
 enum Command {
     /// Serve the aggregator over stdio (default when no subcommand is given).
     Serve,
+
+    /// Check that every server visible to a namespace can be reached and inventoried.
+    Check {
+        /// Emit the preflight result as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+        /// Check only one server from the selected namespace.
+        #[arg(long)]
+        server: Option<String>,
+        /// Accepted for the Phase B2 capability cache; unused by this preflight.
+        #[arg(long)]
+        refresh_cache: bool,
+        /// Accepted for the Phase B2 capability cache; unused by this preflight.
+        #[arg(long)]
+        no_cache_write: bool,
+    },
 
     /// Manage credentials with `cred set`, `cred list`, and `cred rm`.
     /// Secrets are read from a hidden prompt and never printed.
@@ -168,6 +185,12 @@ async fn main() -> ExitCode {
 
     match command {
         Command::Serve => run_serve(config).await,
+        Command::Check {
+            json,
+            server,
+            refresh_cache: _refresh_cache,
+            no_cache_write: _no_cache_write,
+        } => check::run(config, json, server).await,
         Command::Cred { action } => run_cred(action, credential_store),
     }
 }
