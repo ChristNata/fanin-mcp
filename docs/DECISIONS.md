@@ -102,7 +102,7 @@ inventory, and the cache shipped as `fanin-mcp check` in v1.2.
 ## D-014 — All three OSes from day one
 
 **Decision:** Windows 10+, macOS 12+, Linux are release targets with a CI matrix from Phase 5 onward.
-**Why:** Rust makes it ~1–2 days of marginal cost (keyring/dirs/tokio abstract the platforms; the hard platform work — Job Objects — is Windows, which we do anyway). Retrofitting costs more.
+**Why:** Rust makes it ~1–2 days of marginal cost (keyring/tokio abstract the platforms; the hard platform work — Job Objects — is Windows, which we do anyway). Retrofitting costs more.
 
 ## D-015 — Rust + rmcp, exact-pinned
 

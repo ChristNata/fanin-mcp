@@ -288,7 +288,6 @@ always safe.
 | `tracing`, `tracing-subscriber` | Logging + redaction layer | `json`, `fmt` |
 | `process-wrap` (or `command-group`) | Cross-platform process-tree lifetime | Job Objects + process groups |
 | `rpassword` (or similar) | Hidden stdin prompt for `cred set` | |
-| `dirs` | Platform paths | |
 
 CI: 3-OS matrix (Windows/macOS/Linux), `cargo deny` (bans/licenses/sources; advisory scanning paused pending CVSS-4.0 parser support upstream), integration tests against the in-repo probe server (no Node required).
 
@@ -296,6 +295,7 @@ CI: 3-OS matrix (Windows/macOS/Linux), `cargo deny` (bans/licenses/sources; advi
 
 - **Windows (primary):** `cmd /c` wrapper for npm servers, **inside a Job Object** (kill-on-close) — the wrapper alone orphans `node.exe`. DPAPI keychain. `%APPDATA%\fanin-mcp\config.toml` is a conventional location an operator may pass via `--config`; it is not auto-resolved.
 - **macOS / Linux:** direct exec in a fresh process group. Keychain / Secret Service; env fallback covers headless Linux. `~/.config/fanin-mcp/config.toml` is likewise a conventional `--config` location, not an auto-resolved default.
+- **Capability cache:** The platform cache dir is `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` when absolute or `~/.cache` on other Unix platforms, and `~/Library/Caches` on macOS. `FANIN_MCP_CACHE_DIR` overrides it.
 - All three OSes are release targets and CI-tested from day one.
 
 ## What This Architecture Is NOT

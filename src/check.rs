@@ -219,12 +219,39 @@ fn capability_cache_path(namespace: &str) -> Option<PathBuf> {
 
     std::env::var_os("FANIN_MCP_CACHE_DIR")
         .map(PathBuf::from)
-        .or_else(dirs::cache_dir)
+        .or_else(platform_cache_dir)
         .map(|root| {
             root.join("fanin-mcp")
                 .join("capabilities")
                 .join(format!("{namespace}.json"))
         })
+}
+
+/// Returns the platform cache directory using standard environment variables.
+#[cfg(target_os = "windows")]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+}
+
+/// Returns the platform cache directory using standard environment variables.
+#[cfg(target_os = "macos")]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
+}
+
+/// Returns the platform cache directory using standard environment variables.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_cache_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+}
+
+/// Returns no cache directory for unsupported platforms.
+#[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+fn platform_cache_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Returns whether a namespace can safely become one cache filename component.

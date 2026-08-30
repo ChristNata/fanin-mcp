@@ -21,7 +21,7 @@ first use, not at startup.
   committed. The rmcp API moves fast — see the `rmcp-general` skill.
 - **Core crates:** `tokio` (full), `serde`/`serde_json`, `toml`, `clap`
   (derive), `keyring`, `rpassword`, `tracing`/`tracing-subscriber`,
-  `process-wrap`/`command-group`, `dirs`, `schemars`.
+  `process-wrap`/`command-group`, `schemars`.
 - **Anti-stack (deliberately absent):** no web framework, no HTTP server,
   no database/ORM, no plugin loader, no Node/Docker/system services at
   runtime. A PR adding one contradicts ROADMAP non-goals — flag it in review.
