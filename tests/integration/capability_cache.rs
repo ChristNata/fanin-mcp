@@ -29,7 +29,9 @@ const SERVER: &str = "probe";
 const ALLOWED_TOOL: &str = "echo_ok";
 const DENIED_TOOL: &str = "dangerous_noop";
 const ALLOWED_SUMMARY: &str = "Echoes the supplied input back in a successful tool result.";
+const VERBOSE_DESCRIPTION_SENTINEL: &str = "V121_VERBOSE_TOOL_DESCRIPTION_MUST_NOT_APPEAR";
 const CACHE_DIR_ENV: &str = "FANIN_MCP_CACHE_DIR";
+const OVERFLOW_SERVERS: [&str; 4] = ["alpha", "bravo", "charlie", "zulu-tail"];
 
 struct IsolatedCache {
     _temp: TempDir,
@@ -277,14 +279,18 @@ fn write_cache(cache: &IsolatedCache, body: &Value) {
         .expect("write isolated cache fixture");
 }
 
-fn append_cached_tool(body: &mut Value, name: &str, description: &str) {
+fn append_cached_tool(body: &mut Value, server_name: &str, name: &str, description: &str) {
     let tools = body
         .get_mut("servers")
         .and_then(Value::as_array_mut)
-        .and_then(|servers| servers.first_mut())
+        .and_then(|servers| {
+            servers
+                .iter_mut()
+                .find(|server| server.get("name").and_then(Value::as_str) == Some(server_name))
+        })
         .and_then(|server| server.get_mut("tools"))
         .and_then(Value::as_array_mut)
-        .expect("generated cache must have a first server tools array");
+        .unwrap_or_else(|| panic!("generated cache must contain tools for {server_name}"));
     if !tools
         .iter()
         .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
@@ -294,6 +300,50 @@ fn append_cached_tool(body: &mut Value, name: &str, description: &str) {
             "description": description
         }));
     }
+}
+
+fn set_cached_tool_description(
+    body: &mut Value,
+    server_name: &str,
+    tool_name: &str,
+    description: String,
+) {
+    let tool = body
+        .get_mut("servers")
+        .and_then(Value::as_array_mut)
+        .and_then(|servers| {
+            servers
+                .iter_mut()
+                .find(|server| server.get("name").and_then(Value::as_str) == Some(server_name))
+        })
+        .and_then(|server| server.get_mut("tools"))
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| {
+            tools
+                .iter_mut()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        })
+        .unwrap_or_else(|| panic!("generated cache must contain {server_name}__{tool_name}"));
+    tool["description"] = Value::String(description);
+}
+
+fn overflow_config() -> fx::ConfigFile {
+    let mut builder = fx::MultiConfigBuilder::new();
+    for server in OVERFLOW_SERVERS {
+        builder = builder.server(fx::ServerEntry::new(server));
+    }
+    builder
+        .namespace(fx::NamespaceEntry::new(NAMESPACE, OVERFLOW_SERVERS))
+        .write()
+}
+
+fn server_line_is_present(advertisement: &str, server: &str) -> bool {
+    let prefix = format!("- {server}");
+    advertisement.lines().any(|line| {
+        line.strip_prefix(&prefix).is_some_and(|suffix| {
+            suffix.is_empty() || suffix.starts_with(": ") || suffix.starts_with(" (tools: ")
+        })
+    })
 }
 
 fn object_keys(value: &Value) -> BTreeSet<&str> {
@@ -536,6 +586,7 @@ async fn fingerprint_changes_fall_back_to_config_only_advertisement() {
     let mut acl_cache = read_cache(&cache);
     append_cached_tool(
         &mut acl_cache,
+        SERVER,
         DENIED_TOOL,
         "Current ACL tool from a stale cache",
     );
@@ -586,7 +637,7 @@ async fn assert_cache_miss_advertisement(
 }
 
 #[tokio::test]
-async fn valid_cache_enriches_advertisement_with_allowed_summaries_only() {
+async fn valid_cache_enriches_both_advertisement_surfaces_with_allowed_tool_names_only() {
     let cache = IsolatedCache::new();
     let config = stdio_config(
         &fx::probe_bin_path(),
@@ -597,25 +648,153 @@ async fn valid_cache_enriches_advertisement_with_allowed_summaries_only() {
         &[],
     );
     run_successful_check(&cache, &config, &[], false, &[]).await;
-    read_cache(&cache);
+    let mut body = read_cache(&cache);
+    set_cached_tool_description(
+        &mut body,
+        SERVER,
+        ALLOWED_TOOL,
+        format!(
+            "{VERBOSE_DESCRIPTION_SENTINEL} {}",
+            "verbose-detail-".repeat(40)
+        ),
+    );
+    write_cache(&cache, &body);
 
     let (instructions, list_description) = advertisement(&cache, &config).await;
-    let combined = format!("{instructions}\n{list_description}");
+    for (surface_name, surface) in [
+        ("initialize.instructions", instructions.as_str()),
+        ("list_tools description", list_description.as_str()),
+    ] {
+        assert!(
+            server_line_is_present(surface, SERVER),
+            "CA-005: {surface_name} must retain the allowed server line: {surface:?}"
+        );
+        assert!(
+            surface.contains(ALLOWED_TOOL),
+            "CA-005: {surface_name} must carry the allowed tool name: {surface:?}"
+        );
+        assert!(
+            !surface.contains(VERBOSE_DESCRIPTION_SENTINEL),
+            "CA-005: {surface_name} must advertise names only, never cached tool descriptions: {surface:?}"
+        );
+        assert!(
+            !surface.contains(DENIED_TOOL),
+            "CA-003: {surface_name} must omit namespace-denied tool names: {surface:?}"
+        );
+        assert!(
+            !surface.contains("inputSchema")
+                && !surface.contains("input_schema")
+                && !surface.contains("\"properties\"")
+                && !surface.contains("\"type\":\"object\""),
+            "CA-005: {surface_name} may carry compact names, never full JSON schema: {surface:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn advert_lists_every_server_even_when_tool_hints_overflow_budget() {
+    const SYNTHETIC_TOOLS_PER_SERVER: usize = 20;
+
+    let cache = IsolatedCache::new();
+    let config = overflow_config();
+    run_successful_check(&cache, &config, &[], false, &[]).await;
+    let mut body = read_cache(&cache);
+    let mut synthetic_tool_names = Vec::new();
+    for server in OVERFLOW_SERVERS {
+        for index in 0..SYNTHETIC_TOOLS_PER_SERVER {
+            let name = format!(
+                "overflow-tool-{server}-{index:02}-{}",
+                "name-segment-".repeat(11)
+            );
+            append_cached_tool(
+                &mut body,
+                server,
+                &name,
+                &format!(
+                    "legacy verbose detail for {server} tool {index}: {}",
+                    "description-segment-".repeat(10)
+                ),
+            );
+            synthetic_tool_names.push(name);
+        }
+    }
+    let synthetic_name_bytes: usize = synthetic_tool_names.iter().map(String::len).sum();
     assert!(
-        combined.contains(ALLOWED_TOOL) && combined.contains(ALLOWED_SUMMARY),
-        "CA-005: a matching fresh cache must enrich at least one advertisement surface with compact allowed tool summaries: {combined:?}"
+        synthetic_name_bytes > 10_000,
+        "overflow fixture must exceed any reasonable advertisement hint budget"
     );
-    assert!(
-        !instructions.contains(DENIED_TOOL) && !list_description.contains(DENIED_TOOL),
-        "CA-003: namespace-denied tool names must never enter cache-enriched advertisement: {combined:?}"
+    write_cache(&cache, &body);
+
+    let (instructions, list_description) = advertisement(&cache, &config).await;
+    for (surface_name, surface) in [
+        ("initialize.instructions", instructions.as_str()),
+        ("list_tools description", list_description.as_str()),
+    ] {
+        // Check the tail first so the regression reports the live failure mode
+        // directly, then continue through every remaining allowed server.
+        for server in OVERFLOW_SERVERS.into_iter().rev() {
+            assert!(
+                server_line_is_present(surface, server),
+                "RED reason: budget pressure must trim tool-name hints, never drop allowed server {server} from {surface_name}: {surface:?}"
+            );
+        }
+        assert!(
+            synthetic_tool_names
+                .iter()
+                .any(|name| !surface.contains(name)),
+            "{surface_name} must budget the oversized tool-name hint set instead of rendering every hint: {surface:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn config_only_advertisement_sanitizes_server_descriptions_on_both_surfaces() {
+    const TRUNCATED_TAIL: &str = "V121_CONFIG_DESCRIPTION_TAIL_MUST_BE_TRUNCATED";
+    const FORBIDDEN: [char; 3] = ['\u{2028}', '\u{202e}', '\u{200b}'];
+
+    let cache = IsolatedCache::new();
+    let poisoned_description = format!(
+        "Visible config capability \u{2028} injected \u{202e} bidi \u{200b} zero-width {} {TRUNCATED_TAIL}",
+        "padding-".repeat(20)
     );
-    assert!(
-        !combined.contains("inputSchema")
-            && !combined.contains("input_schema")
-            && !combined.contains("\"properties\"")
-            && !combined.contains("\"type\":\"object\""),
-        "CA-005: advertisement may carry compact summaries, never full JSON schema: {combined:?}"
+    let config = stdio_config(
+        &fx::probe_bin_path(),
+        &[],
+        &poisoned_description,
+        &[ALLOWED_TOOL],
+        None,
+        &[],
     );
+
+    let (instructions, list_description) = advertisement(&cache, &config).await;
+    for (surface_name, surface) in [
+        ("initialize.instructions", instructions.as_str()),
+        ("list_tools description", list_description.as_str()),
+    ] {
+        assert!(
+            server_line_is_present(surface, SERVER),
+            "GOTCHA #20: {surface_name} must retain the sanitized config-only server line: {surface:?}"
+        );
+        assert!(
+            surface.contains("Visible config capability"),
+            "GOTCHA #20: {surface_name} must retain safe description text: {surface:?}"
+        );
+        for forbidden in FORBIDDEN {
+            assert!(
+                !surface.contains(forbidden),
+                "GOTCHA #20: {surface_name} must neutralize U+{:04X}: {surface:?}",
+                forbidden as u32
+            );
+        }
+        assert!(
+            !surface.contains(TRUNCATED_TAIL),
+            "GOTCHA #20: {surface_name} must cap the config description before its tail: {surface:?}"
+        );
+        assert!(
+            !surface.contains(ALLOWED_TOOL),
+            "no-cache {surface_name} must remain config-description-only: {surface:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -634,6 +813,7 @@ async fn cache_cannot_authorize_namespace_denied_invoke() {
     let mut body = read_cache(&cache);
     append_cached_tool(
         &mut body,
+        SERVER,
         DENIED_TOOL,
         "A cache entry must never grant permission",
     );
