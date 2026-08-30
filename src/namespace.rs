@@ -1,8 +1,8 @@
 //! Namespace ACL — scopes a session's visible tools.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::config::{TomlConfig, DEFAULT_NAMESPACE};
+use crate::config::{resolve_namespace, TomlConfig, DEFAULT_NAMESPACE};
 
 /// The active namespace ACL for this session.
 ///
@@ -15,10 +15,9 @@ pub struct ActiveNamespace {
     servers: HashSet<String>,
     /// Per-server tool allow-lists. Key present => exact allow-list.
     /// Key absent for an allowed server => all tools on that server visible.
-    /// Stored as `HashSet` so `is_tool_allowed` is an O(1) membership check
-    /// rather than a linear scan — `list_tools` filters every discovered
-    /// tool against this map.
-    tools: HashMap<String, HashSet<String>>,
+    /// Stored in sorted maps and sets so consumers can deterministically
+    /// inspect every present filter, including a present-empty deny-all filter.
+    tools: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ActiveNamespace {
@@ -29,22 +28,18 @@ impl ActiveNamespace {
         } else {
             selected.to_string()
         };
-        let (servers, tools) = config
-            .namespaces
-            .get(&name)
-            .map(|ns| {
-                let tools: HashMap<String, HashSet<String>> = ns
-                    .tools
-                    .iter()
-                    .map(|(server, names)| (server.clone(), names.iter().cloned().collect()))
-                    .collect();
-                (ns.servers.iter().cloned().collect(), tools)
-            })
-            .unwrap_or_default();
+        let resolved = match resolve_namespace(config, &name) {
+            Ok(resolved) => resolved,
+            Err(error) => panic!("ActiveNamespace requires a validated config: {error}"),
+        };
         Self {
             name,
-            servers,
-            tools,
+            servers: resolved.servers,
+            tools: resolved
+                .tools
+                .into_iter()
+                .map(|(server, tools)| (server, tools.into_iter().collect()))
+                .collect(),
         }
     }
 
@@ -77,5 +72,13 @@ impl ActiveNamespace {
         let mut servers: Vec<String> = self.servers.iter().cloned().collect();
         servers.sort();
         servers
+    }
+
+    /// Returns the resolved per-server tool filters in deterministic order.
+    ///
+    /// An absent server key permits all of that server's tools. A present empty
+    /// set denies every tool and remains visible to callers of this accessor.
+    pub fn effective_tool_filters(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.tools
     }
 }

@@ -102,7 +102,7 @@ pub async fn run(
                     .collect::<Vec<_>>();
                 let tool_names: BTreeSet<String> =
                     tools.iter().map(|tool| tool.name.clone()).collect();
-                let missing_tools = explicit_tools(&registry, namespace.name(), &server)
+                let missing_tools = explicit_tools(&namespace, &server)
                     .into_iter()
                     .filter(|tool| !tool_names.contains(tool))
                     .collect::<Vec<_>>();
@@ -267,7 +267,6 @@ fn write_capability_cache(
 /// credential values.
 pub(crate) fn config_fingerprint(config: &TomlConfig, namespace: &ActiveNamespace) -> Value {
     let allowed_servers = namespace.allowed_servers();
-    let selected = config.namespaces.get(namespace.name());
     let servers = allowed_servers
         .iter()
         .filter_map(|name| {
@@ -277,21 +276,10 @@ pub(crate) fn config_fingerprint(config: &TomlConfig, namespace: &ActiveNamespac
                 .map(|server| FingerprintServer::from_config(name, server))
         })
         .collect::<Vec<_>>();
-    let tools = allowed_servers
+    let tools = namespace
+        .effective_tool_filters()
         .iter()
-        .filter_map(|server| {
-            selected
-                .and_then(|selected| selected.tools.get(server))
-                .map(|tools| {
-                    let tools = tools
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect();
-                    (server.clone(), tools)
-                })
-        })
+        .map(|(server, tools)| (server.clone(), tools.iter().cloned().collect()))
         .collect::<BTreeMap<_, _>>();
     serde_json::to_value(ConfigFingerprint {
         namespace: namespace.name(),
@@ -345,20 +333,11 @@ fn selected_namespace(namespace: &str) -> String {
     }
 }
 
-fn explicit_tools(registry: &Registry, namespace: &str, server: &str) -> Vec<String> {
-    registry
-        .toml_config()
-        .namespaces
-        .get(namespace)
-        .and_then(|config| config.tools.get(server))
-        .map(|tools| {
-            tools
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        })
+fn explicit_tools(namespace: &ActiveNamespace, server: &str) -> Vec<String> {
+    namespace
+        .effective_tool_filters()
+        .get(server)
+        .map(|tools| tools.iter().cloned().collect())
         .unwrap_or_default()
 }
 

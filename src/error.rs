@@ -177,6 +177,14 @@ pub enum StartupError {
     EmptyCwd { server: String },
     /// The resolved `--namespace` is not present in `[namespaces]`.
     UnknownNamespace { namespace: String },
+    /// A namespace extends a parent that is not present in `[namespaces]`.
+    UnknownNamespaceParent { namespace: String, parent: String },
+    /// A namespace inheritance graph contains a true DFS back-edge.
+    NamespaceExtendsCycle { namespace: String },
+    /// A namespace inheritance chain exceeds the bounded resolver depth.
+    NamespaceInheritanceTooDeep { namespace: String, max_depth: usize },
+    /// An effective namespace server is not declared in top-level `[servers]`.
+    EffectiveServerUnknown { namespace: String, server: String },
     /// A `[namespaces.<name>.tools]` key names a server that is not in that
     /// namespace's `servers` allow-list. A typo'd key would silently broaden
     /// visibility (an allowed server with no matching `tools` entry exposes
@@ -224,11 +232,35 @@ impl std::fmt::Display for StartupError {
                     "unknown namespace `{namespace}`; not present in [namespaces]"
                 )
             }
+            StartupError::UnknownNamespaceParent { namespace, parent } => {
+                write!(
+                    f,
+                    "namespace `{namespace}` extends unknown parent `{parent}`; add the parent to [namespaces] or remove it from `extends`"
+                )
+            }
+            StartupError::NamespaceExtendsCycle { namespace } => {
+                write!(f, "namespace inheritance cycle detected at `{namespace}`")
+            }
+            StartupError::NamespaceInheritanceTooDeep {
+                namespace,
+                max_depth,
+            } => {
+                write!(
+                    f,
+                    "namespace inheritance for `{namespace}` exceeds the maximum depth of {max_depth}"
+                )
+            }
+            StartupError::EffectiveServerUnknown { namespace, server } => {
+                write!(
+                    f,
+                    "namespace `{namespace}` effectively allows server `{server}`, but it is not declared in [servers]"
+                )
+            }
             StartupError::ToolFilterUnknownServer { namespace, server } => {
                 write!(
                     f,
                     "namespace `{namespace}` has a `tools.{server}` filter but `{server}` is not in \
-                     that namespace's `servers` allow-list; declare the server in `servers` or remove \
+                     that namespace's effective server allow-list; declare or inherit the server, or remove \
                      the stray `tools` key (an allowed server with no `tools` entry exposes all tools)"
                 )
             }

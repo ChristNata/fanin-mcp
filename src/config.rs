@@ -31,7 +31,7 @@
 //! <server> = ["<tool>", ...]   # absent entry for an allowed server => all its tools visible
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -44,6 +44,12 @@ use crate::error::StartupError;
 /// Phase 1: a config that declares `[namespaces.default]` works with the flag
 /// omitted. This is the only namespace-name default Phase 1 synthesizes.
 pub const DEFAULT_NAMESPACE: &str = "default";
+
+/// Maximum number of `extends` links resolved for one namespace.
+///
+/// This bounds recursive resolution of hostile acyclic configurations before
+/// they can exhaust the process stack.
+const MAX_NAMESPACE_INHERITANCE_DEPTH: usize = 64;
 
 /// The resolved CLI configuration for a `serve` invocation.
 ///
@@ -159,11 +165,133 @@ pub struct NamespaceConfig {
     /// The servers visible in this namespace.
     #[serde(default)]
     pub servers: Vec<String>,
+    /// Parent namespaces whose permissions this namespace composes.
+    #[serde(default)]
+    pub extends: Vec<String>,
     /// Optional per-server tool allow-lists (name-level only).
     /// Keys are server names (should be in `servers`); values are exact tool
     /// name lists. Absent entry for an allowed server => all tools visible.
     #[serde(default)]
     pub tools: HashMap<String, Vec<String>>,
+}
+
+/// The effective ACL after resolving a namespace's inheritance graph.
+///
+/// An absent `tools` key means all tools are permitted for its server. A
+/// present empty set means no tools are permitted and must never be removed.
+#[derive(Debug, Clone)]
+pub struct ResolvedNamespace {
+    /// The selected namespace's effective visible servers.
+    pub servers: HashSet<String>,
+    /// The selected namespace's restrictive effective tool filters.
+    pub tools: HashMap<String, HashSet<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisitState {
+    Visiting,
+    Done,
+}
+
+/// Resolves the effective ACL for a namespace.
+///
+/// Servers compose by union. Tool filters compose by restrictive intersection:
+/// an absent filter is the `All` identity and a present empty filter is `None`.
+/// The DFS state distinguishes an active back-edge from a completed branch, so
+/// a diamond inheritance graph remains valid.
+pub fn resolve_namespace(
+    config: &TomlConfig,
+    name: &str,
+) -> Result<ResolvedNamespace, StartupError> {
+    let mut states = HashMap::new();
+    let mut resolved = HashMap::new();
+    resolve_namespace_inner(config, name, None, 0, &mut states, &mut resolved)
+}
+
+fn resolve_namespace_inner(
+    config: &TomlConfig,
+    name: &str,
+    child: Option<&str>,
+    depth: usize,
+    states: &mut HashMap<String, VisitState>,
+    resolved: &mut HashMap<String, ResolvedNamespace>,
+) -> Result<ResolvedNamespace, StartupError> {
+    if depth > MAX_NAMESPACE_INHERITANCE_DEPTH {
+        return Err(StartupError::NamespaceInheritanceTooDeep {
+            namespace: name.to_string(),
+            max_depth: MAX_NAMESPACE_INHERITANCE_DEPTH,
+        });
+    }
+
+    match states.get(name) {
+        Some(VisitState::Visiting) => {
+            return Err(StartupError::NamespaceExtendsCycle {
+                namespace: name.to_string(),
+            });
+        }
+        Some(VisitState::Done) => {
+            return resolved.get(name).cloned().ok_or_else(|| {
+                StartupError::NamespaceExtendsCycle {
+                    namespace: name.to_string(),
+                }
+            });
+        }
+        None => {}
+    }
+
+    let namespace = config.namespaces.get(name).ok_or_else(|| match child {
+        Some(child) => StartupError::UnknownNamespaceParent {
+            namespace: child.to_string(),
+            parent: name.to_string(),
+        },
+        None => StartupError::UnknownNamespace {
+            namespace: name.to_string(),
+        },
+    })?;
+
+    states.insert(name.to_string(), VisitState::Visiting);
+    let mut effective = ResolvedNamespace {
+        servers: HashSet::new(),
+        tools: HashMap::new(),
+    };
+
+    for parent in &namespace.extends {
+        let parent =
+            resolve_namespace_inner(config, parent, Some(name), depth + 1, states, resolved)?;
+        merge_resolved_namespace(&mut effective, &parent);
+    }
+
+    effective.servers.extend(namespace.servers.iter().cloned());
+    merge_tool_filters(
+        &mut effective.tools,
+        namespace
+            .tools
+            .iter()
+            .map(|(server, tools)| (server.clone(), tools.iter().cloned().collect())),
+    );
+
+    states.insert(name.to_string(), VisitState::Done);
+    resolved.insert(name.to_string(), effective.clone());
+    Ok(effective)
+}
+
+fn merge_resolved_namespace(target: &mut ResolvedNamespace, incoming: &ResolvedNamespace) {
+    target.servers.extend(incoming.servers.iter().cloned());
+    merge_tool_filters(&mut target.tools, incoming.tools.clone());
+}
+
+fn merge_tool_filters(
+    target: &mut HashMap<String, HashSet<String>>,
+    incoming: impl IntoIterator<Item = (String, HashSet<String>)>,
+) {
+    for (server, tools) in incoming {
+        if let Some(current) = target.get_mut(&server) {
+            current.retain(|tool| tools.contains(tool));
+        } else {
+            // Inserting an empty set is intentional: present-empty means NONE.
+            target.insert(server, tools);
+        }
+    }
 }
 
 /// Load and validate the TOML config file at `config_path`.
@@ -253,24 +381,26 @@ impl TomlConfig {
             });
         }
 
-        // 5. Every `[namespaces.<name>.tools]` server key MUST also appear in
-        //    that namespace's `servers` allow-list. A typo'd `tools.<server>`
-        //    key would otherwise be silently ignored: an allowed server with
-        //    no matching `tools` entry exposes ALL its tools, so a stray key
-        //    cannot grant access but the *intended* restriction fails open
-        //    without any startup signal. Fail fast across ALL namespaces so a
-        //    malformed config surfaces regardless of which namespace is
-        //    currently selected (consistent startup validation).
-        //
-        //    Tool NAMES are intentionally NOT validated here — tools are only
-        //    known after lazy discovery, so a listed tool that does not exist
-        //    on the upstream simply never matches (see `tests.md`).
-        for (ns_name, ns) in &self.namespaces {
-            for tool_server in ns.tools.keys() {
-                if !ns.servers.iter().any(|s| s == tool_server) {
+        // 5. Resolve and validate every namespace, not only the selected one.
+        //    Tool-filter keys are checked against the effective server set so a
+        //    child can restrict an inherited server without re-listing it.
+        //    Tool names themselves remain discovery-time data and are not
+        //    validated here.
+        for namespace_name in self.namespaces.keys() {
+            let resolved = resolve_namespace(self, namespace_name)?;
+            for server in &resolved.servers {
+                if !self.servers.contains_key(server) {
+                    return Err(StartupError::EffectiveServerUnknown {
+                        namespace: namespace_name.clone(),
+                        server: server.clone(),
+                    });
+                }
+            }
+            for server in resolved.tools.keys() {
+                if !resolved.servers.contains(server) {
                     return Err(StartupError::ToolFilterUnknownServer {
-                        namespace: ns_name.clone(),
-                        server: tool_server.clone(),
+                        namespace: namespace_name.clone(),
+                        server: server.clone(),
                     });
                 }
             }
