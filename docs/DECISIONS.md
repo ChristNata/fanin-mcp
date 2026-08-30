@@ -163,6 +163,12 @@ instructions. Config-only rendering preserves lazy serve startup.
 **Rejected:** Upstream inventory during initialize or protocol `tools/list` —
 that fan-out violates D-003 and turns session startup into an availability
 dependency.
+**Amendment (v1.2.1):** The ToC is compact and complete — every allowed server
+always appears (`- <name>[: <description>]`), and the cache hint is tool **names
+only**, never per-tool descriptions. Under the char budget the renderer trims the
+name hints, never drops a server. This fixes a v1.2.0 defect where the
+full-description cache dump overflowed the budget and silently dropped tail
+servers from the advertisement.
 
 ## D-022 — `check` preflight and reconstructible advisory capability cache
 

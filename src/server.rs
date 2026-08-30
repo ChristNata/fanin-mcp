@@ -68,60 +68,76 @@ impl Aggregator {
 
     /// Builds the configured server table of contents without inventorying upstreams.
     fn configured_toc(&self) -> Option<String> {
-        const INSTRUCTIONS_BUDGET: usize = 2_000;
+        const INSTRUCTIONS_BUDGET: usize = 3_000;
         const TOC_HEADER: &str = "\n\nConfigured servers:\n";
 
         let registry = self.registry.as_ref()?;
         let namespace = self.namespace.as_ref()?;
         let config = registry.toml_config();
         let cache_summaries = crate::check::matching_cache_tool_summaries(config, namespace);
-        let mut toc = String::from(TOC_HEADER);
-        let mut has_entry = false;
-
-        for server in namespace.allowed_servers() {
-            let description = config
-                .servers
-                .get(&server)
-                .and_then(|server_config| server_config.description.as_deref())
-                .map(sanitize_list_row_description)
-                .filter(|description| !description.is_empty());
-            let mut entry = match description {
-                Some(description) => format!("- {server}: {description}\n"),
-                None => format!("- {server}\n"),
-            };
-            if let Some(tools) = cache_summaries.get(&server) {
-                let summaries = tools
-                    .iter()
-                    // Authorization remains the namespace query, never the
-                    // cache. Sanitize cached upstream-authored display text
-                    // before it enters either advertisement surface.
-                    .filter(|(name, _)| namespace.is_tool_allowed(&server, name))
-                    .map(|(name, description)| {
-                        let name = sanitize_upstream_identifier(name);
-                        let description = sanitize_list_row_description(description);
-                        if description.is_empty() {
-                            name
-                        } else {
-                            format!("{name} — {description}")
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if !summaries.is_empty() {
-                    entry = entry.trim_end().to_string();
-                    entry.push_str(" (tools: ");
-                    entry.push_str(&summaries.join(", "));
-                    entry.push_str(")\n");
-                }
-            }
-
-            if toc.len() + entry.len() > INSTRUCTIONS_BUDGET {
-                break;
-            }
-            toc.push_str(&entry);
-            has_entry = true;
+        let servers = namespace.allowed_servers();
+        if servers.is_empty() {
+            return None;
         }
 
-        has_entry.then_some(toc)
+        // Server lines are the durable part of the advertisement. Render every
+        // one before spending the bounded space on optional cache-derived hints.
+        let entries = servers
+            .iter()
+            .map(|server| {
+                let description = config
+                    .servers
+                    .get(server)
+                    .and_then(|server_config| server_config.description.as_deref())
+                    .map(sanitize_list_row_description)
+                    .filter(|description| !description.is_empty());
+                match description {
+                    Some(description) => format!("- {server}: {description}\n"),
+                    None => format!("- {server}\n"),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let base_len = TOC_HEADER.len() + entries.iter().map(String::len).sum::<usize>();
+        let mut remaining_budget = INSTRUCTIONS_BUDGET.saturating_sub(base_len);
+        let mut hints = Vec::with_capacity(servers.len());
+
+        for server in &servers {
+            let names = cache_summaries
+                .get(server)
+                .into_iter()
+                .flatten()
+                // Authorization remains the namespace query, never the cache.
+                .filter(|(name, _)| namespace.is_tool_allowed(server, name))
+                .map(|(name, _)| sanitize_upstream_identifier(name))
+                .collect::<Vec<_>>();
+
+            let hint = (1..=names.len()).rev().find_map(|shown| {
+                let omitted = names.len() - shown;
+                let more = (omitted > 0).then(|| format!(" +{omitted} more"));
+                let hint = format!(
+                    " (tools: {}{})",
+                    names[..shown].join(", "),
+                    more.unwrap_or_default()
+                );
+                (hint.len() <= remaining_budget).then_some(hint)
+            });
+            if let Some(hint) = hint {
+                remaining_budget -= hint.len();
+                hints.push(hint);
+            } else {
+                hints.push(String::new());
+            }
+        }
+
+        let mut toc = String::with_capacity(base_len + INSTRUCTIONS_BUDGET - remaining_budget);
+        toc.push_str(TOC_HEADER);
+        for (entry, hint) in entries.into_iter().zip(hints) {
+            toc.push_str(entry.trim_end());
+            toc.push_str(&hint);
+            toc.push('\n');
+        }
+        Some(toc)
     }
 }
 
