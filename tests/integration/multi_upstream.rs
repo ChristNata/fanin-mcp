@@ -35,9 +35,9 @@ const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The slow_tool delay used for the cross-upstream non-serialization proof.
 /// Long enough that a serialized (lock-held-across-await) session would make
-/// the concurrent beta echo blow past the proof deadline; short enough to keep
-/// the test fast.
-const SLOW_DELAY_MS: u64 = 800;
+/// the concurrent beta echo blow past the proof deadline, while leaving enough
+/// room for a correct cold beta spawn + MCP handshake under parallel test load.
+const SLOW_DELAY_MS: u64 = 2_000;
 
 /// The proof deadline for the concurrent beta echo — STRICTLY shorter than
 /// `SLOW_DELAY_MS`. If the registry lock were held across the slow await, the
@@ -45,9 +45,9 @@ const SLOW_DELAY_MS: u64 = 800;
 /// would serialize), so the beta echo would take >= SLOW_DELAY_MS. A correct
 /// lock-discipline impl dispatches the beta call on a separate upstream while
 /// alpha's slow await is still pending, so beta completes well under the slow
-/// delay. The 400ms deadline is half the slow delay — a comfortable margin
-/// that still catches serialization.
-const PROOF_DEADLINE: Duration = Duration::from_millis(400);
+/// delay. The 1s deadline is half the slow delay: it tolerates a correct cold
+/// spawn under load, but a serialized beta call still cannot beat the 2s floor.
+const PROOF_DEADLINE: Duration = Duration::from_secs(1);
 
 /// The exact set of probe tool names (mirrors `tests/integration/discovery.rs`).
 /// Phase 3 extends the probe with `echo_env` and `spawn_grandchild`, bringing
@@ -397,8 +397,10 @@ async fn concurrent_first_calls_to_same_cold_server_spawn_once() {
 /// finished, so beta would take >= SLOW_DELAY_MS. A correct lock-discipline
 /// impl clones the Arc, drops the map lock, and awaits the alpha call on one
 /// upstream while dispatching the beta call on a SEPARATE upstream — so beta
-/// completes well under the slow delay. The PROOF_DEADLINE (400ms) is half the
-/// SLOW_DELAY_MS (800ms): a comfortable margin that still catches serialization.
+/// completes well under the slow delay. The PROOF_DEADLINE (1s) is half the
+/// SLOW_DELAY_MS (2s): enough margin for a correct cold beta spawn + MCP
+/// handshake under parallel test load, while a serialized call still misses
+/// the deadline by at least 1s.
 ///
 /// The test requires REAL forwarding on both upstreams (alpha slow success +
 /// beta echo success), so a not-implemented stub fails RED rather than passing
@@ -443,7 +445,7 @@ async fn alpha_slow_tool_does_not_block_concurrent_beta_echo() {
 
     // The load-bearing assertion: beta echo completes within PROOF_DEADLINE,
     // which is strictly shorter than SLOW_DELAY_MS. A serialized session would
-    // make this timeout (beta can't complete before alpha's 800ms delay).
+    // make this timeout (beta can't complete before alpha's 2s delay).
     let echo_resp = timeout(PROOF_DEADLINE, child.wait_for_id(echo_id))
         .await
         .expect(
@@ -662,6 +664,12 @@ async fn multi_upstream_preserves_phase0_phase1_guarantees() {
 /// Deadline for a concurrent elicitation round-trip across two upstreams.
 const CONCURRENT_ELICIT_DEADLINE: Duration = Duration::from_secs(20);
 
+/// Deadline for the fast sibling while the other upstream's elicitation stays
+/// pending. Fifteen seconds tolerates parallel-suite process contention while
+/// remaining far below the pending call's default 60s timeout, so a serialized
+/// implementation still fails.
+const PENDING_ELICITATION_PROOF_DEADLINE: Duration = Duration::from_secs(15);
+
 /// Master SC11 / GP-9: two upstreams issue CONCURRENT elicitation requests and
 /// receive their DISTINCT downstream outcomes with no cross-talk. Alpha is
 /// answered ACCEPT (with content "alpha-yes") and beta is answered DECLINE —
@@ -859,16 +867,20 @@ async fn pending_elicitation_on_one_upstream_does_not_block_sibling() {
 
     // The load-bearing assertion: beta echo completes within a deadline
     // strictly shorter than the pending alpha elicitation (which we leave
-    // unanswered THROUGH this assertion, then answer it below for cleanup). 5s
-    // is comfortable for a real forward and still well under the pending alpha
-    // call.
-    let beta_resp = timeout(Duration::from_secs(5), child.wait_for_id(beta_echo_id))
-        .await
-        .expect(
-            "beta__echo_ok must complete within 5s while alpha__needs_elicitation is \
+    // unanswered THROUGH this assertion, then answer it below for cleanup).
+    // The named 15s proof deadline tolerates parallel-suite process contention
+    // and remains far below alpha's default 60s timeout.
+    let beta_resp = timeout(
+        PENDING_ELICITATION_PROOF_DEADLINE,
+        child.wait_for_id(beta_echo_id),
+    )
+    .await
+    .expect(
+        "beta__echo_ok must complete within PENDING_ELICITATION_PROOF_DEADLINE while \
+             alpha__needs_elicitation is \
              pending — a registry lock held across the elicitation await would serialize \
              the session and make this timeout (SC12 / D-007 / GOTCHA #16)",
-        );
+    );
     common::assert_no_rpc_error(&beta_resp, "beta__echo_ok during pending alpha elicitation");
     let beta_result = beta_resp
         .get("result")

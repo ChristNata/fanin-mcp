@@ -25,6 +25,7 @@ mod credentials;
 #[path = "../../src/error.rs"]
 mod error;
 
+mod advertisement;
 mod aggregator;
 mod config;
 mod cred_store;

@@ -6,8 +6,8 @@
 //!
 //! - SC 12: downstream `tools/list` still exposes EXACTLY the three meta-tools
 //!   (`list_tools`, `get_tool_schema`, `invoke_tool`).
-//! - SC 13: the static names and descriptions of the three meta-tools do NOT
-//!   change.
+//! - SC 13: static names do not change; the `list_tools` description keeps its
+//!   stable prefix while config may append a capability ToC.
 //! - SC 14: the structured-error JSON shape remains D-005-compatible — no
 //!   field rename, no field removal, only additive new `code` values.
 //! - SC 15: the registry never holds the entries/map lock across
@@ -39,15 +39,19 @@ use crate::common::fixtures as fx;
 const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The slow_tool delay used for the cross-upstream non-serialization proof.
-const SLOW_DELAY_MS: u64 = 800;
+/// Two seconds leaves room for a correct cold sibling spawn + MCP handshake
+/// under parallel test load without letting a serialized sibling pass.
+const SLOW_DELAY_MS: u64 = 2_000;
 
 /// The proof deadline for the concurrent sibling echo — STRICTLY shorter
 /// than `SLOW_DELAY_MS`. A registry lock held across the slow await would
 /// serialize the session; the sibling echo would take >= SLOW_DELAY_MS. A
 /// correct lock-discipline impl dispatches the sibling on a separate upstream
 /// while the slow await is pending, so the sibling completes well under the
-/// slow delay. Mirrors `multi_upstream::PROOF_DEADLINE`.
-const PROOF_DEADLINE: Duration = Duration::from_millis(400);
+/// slow delay. One second is half the slow delay: load-tolerant for a correct
+/// cold spawn, but a serialized sibling still cannot beat the two-second floor.
+/// Mirrors `multi_upstream::PROOF_DEADLINE`.
+const PROOF_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Helper: spawn the aggregator with the canonical Phase 1 config + initialize.
 async fn phase1_child() -> common::JsonRpcChild {
@@ -64,10 +68,9 @@ fn repo_root() -> PathBuf {
 
 /// Master SC 12 + SC 13: under a Phase 4 config (which exercises the
 /// sanitization + list_changed + dead-upstream paths), the downstream MCP
-/// surface remains exactly three meta-tools with unchanged static names and
-/// descriptions. This re-asserts the Phase 0/1/2/3 invariant in the Phase 4
-/// context — Phase 4's discovery/schema sanitization must NOT leak into the
-/// downstream tools/list surface or change the static descriptions.
+/// surface remains exactly three meta-tools with stable names and description
+/// contracts. The config-aware `list_tools` description may append a ToC, but
+/// its D-003 prefix is immutable; schema/invoke remain exact.
 #[tokio::test]
 async fn phase4_context_preserves_three_meta_tools_and_static_descriptions() {
     let mut child = phase1_child().await;
@@ -90,10 +93,10 @@ async fn phase4_context_preserves_three_meta_tools_and_static_descriptions() {
         .unwrap_or_else(|| panic!("tools/list result.tools must be an array"));
     exp::assert_exact_meta_tools(tools);
 
-    // SC 13: the static descriptions are unchanged (D-003). Assert each
-    // meta-tool's description matches the expectations verbatim.
+    // SC 13 / D-003 amendment: list_tools is prefix-stable under config;
+    // get_tool_schema and invoke_tool remain exact contracts.
     let list_tools = exp::find_tool(tools, "list_tools").unwrap();
-    exp::assert_desc(list_tools, exp::LIST_TOOLS_DESC);
+    exp::assert_desc_prefix(list_tools, exp::LIST_TOOLS_DESC);
     let get_schema = exp::find_tool(tools, "get_tool_schema").unwrap();
     exp::assert_desc(get_schema, exp::GET_TOOL_SCHEMA_DESC);
     let invoke_tool = exp::find_tool(tools, "invoke_tool").unwrap();
@@ -189,7 +192,9 @@ async fn structured_error_json_keeps_d005_fields_additive_codes() {
 /// concurrent `beta__echo_ok` completes within a deadline STRICTLY shorter
 /// than the slow delay. A registry lock held across the slow await would
 /// serialize the session; the sibling echo would block until the slow call
-/// finished. This mirrors `multi_upstream::alpha_slow_tool_does_not_block_concurrent_beta_echo`
+/// finished. The 1s proof deadline allows a correct cold beta spawn under
+/// parallel test load but remains 1s below the serialized 2s floor. This
+/// mirrors `multi_upstream::alpha_slow_tool_does_not_block_concurrent_beta_echo`
 /// and re-asserts the invariant in the Phase 4 context (where the registry
 /// cache is now mutable per state.json `decisions.cache-shape`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

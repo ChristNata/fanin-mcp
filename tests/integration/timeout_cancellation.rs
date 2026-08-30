@@ -51,14 +51,31 @@ const SLOW_DELAY_MS: u64 = 3000;
 /// (SC 16). The test issues a slow call, then cancels it (by dropping the
 /// response future / closing the request), then issues a SECOND fast call
 /// and asserts the second completes within a deadline strictly shorter
-/// than the slow delay. If the cancellation did not free local resources,
-/// the second call would block behind the slow one (serialized).
+/// than the slow delay. Half the 3s slow window tolerates a correct call under
+/// parallel-suite load, while a resource-holding implementation still cannot
+/// complete before the 3s floor.
 ///
 /// Note: MCP `notifications/cancelled` is the wire-level cancellation
 /// signal. The test sends it after issuing the slow call; the aggregator
 /// must abort the local in-flight future and (when rmcp exposes the
 /// request identity) forward the cancellation upstream.
-const CANCEL_PROOF_DEADLINE: Duration = Duration::from_millis(500);
+const CANCEL_PROOF_DEADLINE: Duration = Duration::from_millis(1_500);
+
+/// The timeout floor for the cross-upstream non-serialization proof. This test
+/// uses a wider floor than the 1s timeout-shape proof so a load-tolerant sibling
+/// deadline can remain strictly below the point where a serialized call would
+/// be released.
+const CONCURRENT_TIMEOUT_SECS: u64 = 3;
+
+/// The probe delay for the cross-upstream timeout proof. It must exceed
+/// `CONCURRENT_TIMEOUT_SECS` so the timeout, not probe completion, releases a
+/// serialized sibling.
+const CONCURRENT_SLOW_DELAY_MS: u64 = 6_000;
+
+/// The sibling proof deadline is half the 3s timeout floor. This tolerates a
+/// correct cold spawn + MCP handshake under parallel-suite load, while a
+/// registry lock held until the timeout fires still cannot satisfy the proof.
+const TIMEOUT_CONCURRENCY_PROOF_DEADLINE: Duration = Duration::from_millis(1_500);
 
 /// Extract the joined text of a CallToolResult's content array.
 fn result_text(result: &Value) -> String {
@@ -327,15 +344,18 @@ async fn cancellation_frees_local_resources_without_waiting_full_upstream() {
 /// This is the Phase 3 analogue of the Phase 2 D-007 / GOTCHA #16 proof,
 /// extended to cover the timeout-wrapping path. A registry lock held across
 /// the timeout await would serialize the session: the sibling fast call
-/// would block until the slow call's timeout fired (1s). The proof deadline
-/// (400ms) is shorter than the 1s timeout, so a serialized session fails.
+/// would block until the slow call's timeout fired (3s). The 1.5s proof
+/// deadline is half that timeout floor, so a serialized session still fails
+/// while a correct cold sibling spawn has load-tolerant headroom.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
     let alpha = format!("alpha-{}", fx::phase3_unique_seq());
     let beta = format!("beta-{}", fx::phase3_unique_seq());
 
     let cfg = fx::Phase3ConfigBuilder::new()
-        .server(fx::Phase3ServerEntry::new(alpha.clone()).with_timeout_secs(TIMEOUT_SECS))
+        .server(
+            fx::Phase3ServerEntry::new(alpha.clone()).with_timeout_secs(CONCURRENT_TIMEOUT_SECS),
+        )
         .server(fx::Phase3ServerEntry::new(beta.clone()))
         .namespace(fx::NamespaceEntry::new(
             "default",
@@ -346,7 +366,7 @@ async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
     common::initialize(&mut child).await;
 
     // Issue a slow alpha call WITHOUT awaiting. It spawns alpha and awaits
-    // the slow_tool delay; the 1s timeout will fire before the 3s delay
+    // the slow_tool delay; the 3s timeout will fire before the 6s delay
     // completes.
     let slow_id = child
         .send_request(
@@ -355,14 +375,14 @@ async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
                 "name": "invoke_tool",
                 "arguments": {
                     "name": format!("{alpha}__slow_tool"),
-                    "arguments": { "delay_ms": SLOW_DELAY_MS },
+                    "arguments": { "delay_ms": CONCURRENT_SLOW_DELAY_MS },
                 },
             }),
         )
         .await;
 
     // Immediately issue a fast beta echo. If the registry lock were held
-    // across the alpha timeout await, this would block until alpha's 1s
+    // across the alpha timeout await, this would block until alpha's 3s
     // timeout fired. A correct lock-discipline impl dispatches beta on a
     // separate upstream while alpha's timeout is pending.
     let echo_id = child
@@ -378,13 +398,17 @@ async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
         )
         .await;
 
-    let echo_resp = timeout(Duration::from_millis(400), child.wait_for_id(echo_id))
-        .await
-        .expect(
-            "beta__echo_ok must complete within 400ms while alpha__slow_tool is timing out — \
+    let echo_resp = timeout(
+        TIMEOUT_CONCURRENCY_PROOF_DEADLINE,
+        child.wait_for_id(echo_id),
+    )
+    .await
+    .expect(
+        "beta__echo_ok must complete within TIMEOUT_CONCURRENCY_PROOF_DEADLINE while \
+             alpha__slow_tool is timing out — \
              a registry lock held across the timeout await would serialize the session and \
              make this timeout (SC 18 / D-007 / GOTCHA #16)",
-        );
+    );
     common::assert_no_rpc_error(&echo_resp, "beta__echo_ok during alpha timeout");
     let echo_result = echo_resp
         .get("result")

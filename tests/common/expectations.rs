@@ -68,6 +68,21 @@ pub fn assert_desc(tool: &serde_json::Value, expected: &str) {
     );
 }
 
+/// Assert a tool's `description` starts with the stable contract prefix.
+pub fn assert_desc_prefix(tool: &serde_json::Value, expected_prefix: &str) {
+    let desc = tool
+        .get("description")
+        .unwrap_or_else(|| panic!("tool `{}` missing description", tool_name(tool)));
+    let got = desc
+        .as_str()
+        .unwrap_or_else(|| panic!("tool description is not a string: {desc}"));
+    assert!(
+        got.starts_with(expected_prefix),
+        "tool `{}` description must start with the stable prefix; got: {got:?}",
+        tool_name(tool)
+    );
+}
+
 fn tool_name(tool: &serde_json::Value) -> String {
     tool.get("name")
         .and_then(|n| n.as_str())
