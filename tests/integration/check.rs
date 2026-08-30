@@ -209,58 +209,6 @@ fn assert_failure(output: &common::CliOutput, body: &Value) {
     );
 }
 
-#[cfg(windows)]
-fn probe_child_pids(parent_pid: u32) -> Vec<u32> {
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Filter \"ParentProcessId = {parent_pid}\" | Where-Object {{ $_.Name -like 'probe-server*' }} | ForEach-Object {{ $_.ProcessId }}"
-    );
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("PowerShell process query must run");
-    assert!(
-        output.status.success(),
-        "PowerShell process query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
-}
-
-#[cfg(unix)]
-fn probe_child_pids(parent_pid: u32) -> Vec<u32> {
-    let output = Command::new("ps")
-        .args(["-eo", "pid=,ppid=,comm="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("ps process query must run");
-    assert!(
-        output.status.success(),
-        "ps process query failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse::<u32>().ok()?;
-            let ppid = fields.next()?.parse::<u32>().ok()?;
-            let command = fields.next()?;
-            (ppid == parent_pid && command.starts_with("probe-server")).then_some(pid)
-        })
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn probe_child_pids(_parent_pid: u32) -> Vec<u32> {
-    panic!("probe PID oracle is unsupported on this platform")
-}
-
 fn process_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -546,15 +494,12 @@ async fn serve_initialize_still_lazy_after_check_exists() {
         .namespace(fx::NamespaceEntry::new("default", ["first", "second"]))
         .write();
     let mut child = common::spawn_fanin_with_config(&config.path_str(), None).await;
-    let fanin_pid = child.process_id();
     common::initialize(&mut child).await;
     let list = common::list_tools(&mut child).await;
     common::assert_no_rpc_error(&list, "serve protocol tools/list after check exists");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        probe_child_pids(fanin_pid).is_empty(),
-        "serve initialize + protocol tools/list must leave zero probe-server child PIDs"
-    );
+    // Each path is unique to this test. Log-line absence is authoritative and
+    // cannot be polluted by a prior process whose parent PID was reused.
     for (name, path) in [("first", first_log), ("second", second_log)] {
         let log = std::fs::read_to_string(path).unwrap_or_default();
         assert!(

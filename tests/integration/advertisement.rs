@@ -188,9 +188,9 @@ async fn initialize_advertises_only_allowed_servers_with_config_descriptions() {
     child.into_guard().shutdown().await.ok();
 }
 
-/// A2.2 / CA-002 and A2.6 / N1: initialize plus protocol `tools/list` leaves
-/// no probe PID and no child-log prefix. The `list_tools` meta-tool then
-/// returns real inventory and creates probe PIDs/log lines in the same session.
+/// A2.2 / CA-002 and A2.6 / N1: initialize plus protocol `tools/list` writes
+/// no child-log prefix. The `list_tools` meta-tool then returns real inventory
+/// and creates probe PIDs/log lines in the same session.
 #[tokio::test]
 async fn initialize_and_protocol_tools_list_do_not_spawn_but_meta_list_tools_does() {
     let (cfg, servers) = advertisement_config();
@@ -203,11 +203,9 @@ async fn initialize_and_protocol_tools_list_do_not_spawn_but_meta_list_tools_doe
     exp::assert_exact_meta_tools(response_tools(&protocol_list));
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let pids_before = probe_child_pids(fanin_pid);
-    assert!(
-        pids_before.is_empty(),
-        "initialize + protocol tools/list must spawn zero probe-server children; found PIDs {pids_before:?}"
-    );
+    // These files are unique to this test, so their child-line absence is the
+    // authoritative no-spawn oracle. A negative PPID query is unsound here:
+    // macOS can reuse this fanin PID while a prior probe is still being reaped.
     for server in &servers {
         let log = std::fs::read_to_string(&server.log_path).unwrap_or_default();
         assert!(
