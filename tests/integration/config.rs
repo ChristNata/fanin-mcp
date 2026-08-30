@@ -262,3 +262,66 @@ async fn config_with_nonexistent_command_still_starts_due_to_lazy_spawn() {
 
     child.into_guard().shutdown().await.ok();
 }
+
+/// A1.SC1 / CA-004 data-model half: a configured description is retained on
+/// the deserialized production `ServerConfig` rather than merely tolerated as
+/// an unknown TOML key.
+#[test]
+fn server_description_deserializes_when_present() {
+    let fixture = fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("probe").with_description("Code navigation"))
+        .namespace(fx::NamespaceEntry::new("default", ["probe"]))
+        .write();
+
+    let config = crate::config_model::load_and_validate(&fixture.path, "")
+        .expect("description-bearing config must deserialize and validate");
+    let server = config
+        .servers
+        .get("probe")
+        .expect("fixture must contain the probe server");
+
+    assert_eq!(server.description.as_deref(), Some("Code navigation"));
+}
+
+/// A1.SC2: omitting the additive key preserves the old fixture shape and
+/// defaults the production field to `None`.
+#[test]
+fn server_description_defaults_to_none_when_omitted() {
+    let fixture = fx::ConfigBuilder::new().write();
+
+    let config = crate::config_model::load_and_validate(&fixture.path, "")
+        .expect("existing description-free fixture must deserialize and validate");
+    let server = config
+        .servers
+        .get("probe")
+        .expect("fixture must contain the probe server");
+
+    assert_eq!(server.description, None);
+}
+
+/// A1.SC3: startup validation is description-neutral. The same valid config
+/// passes `load_and_validate` both with the key present and with it omitted.
+#[test]
+fn server_description_is_optional_for_validation() {
+    let with_description = fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("probe").with_description("Code navigation"))
+        .namespace(fx::NamespaceEntry::new("default", ["probe"]))
+        .write();
+    let without_description = fx::MultiConfigBuilder::new()
+        .server(fx::ServerEntry::new("probe"))
+        .namespace(fx::NamespaceEntry::new("default", ["probe"]))
+        .write();
+
+    let with_description = crate::config_model::load_and_validate(&with_description.path, "")
+        .expect("validation must accept description");
+    let without_description = crate::config_model::load_and_validate(&without_description.path, "")
+        .expect("validation must not require description");
+
+    assert_eq!(
+        (
+            with_description.servers["probe"].description.as_deref(),
+            without_description.servers["probe"].description.as_deref(),
+        ),
+        (Some("Code navigation"), None)
+    );
+}

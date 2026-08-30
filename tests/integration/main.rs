@@ -15,6 +15,16 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+// Compile the production config model into this integration crate so config
+// data-model tests can assert deserialized fields directly. This binary-only
+// package has no library target to import.
+#[path = "../../src/config.rs"]
+mod config_model;
+#[path = "../../src/credentials.rs"]
+mod credentials;
+#[path = "../../src/error.rs"]
+mod error;
+
 mod aggregator;
 mod config;
 mod cred_store;

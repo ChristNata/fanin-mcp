@@ -247,6 +247,11 @@ fn escape_literal(s: &str) -> String {
     s.replace('\u{0000}', "").replace('\'', "\\'")
 }
 
+/// Escape a TOML basic string used for human-readable fixture fields.
+fn escape_basic(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 // ---- Phase 2 multi-upstream + namespace-ACL fixtures -----------------------
 
 /// A server entry for the Phase 2 multi-server config builder.
@@ -266,6 +271,8 @@ pub struct ServerEntry {
     pub log_file: Option<String>,
     /// Optional per-server working directory.
     pub cwd: Option<String>,
+    /// Optional human-readable capability description.
+    pub description: Option<String>,
 }
 
 impl ServerEntry {
@@ -275,6 +282,7 @@ impl ServerEntry {
             name: name.into(),
             log_file: None,
             cwd: None,
+            description: None,
         }
     }
 
@@ -288,6 +296,12 @@ impl ServerEntry {
     #[allow(dead_code)] // fixture API used by remediation builders as needed.
     pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Attach a human-readable capability description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 }
@@ -391,6 +405,12 @@ impl MultiConfigBuilder {
             s.push_str("transport = \"stdio\"\n");
             s.push_str(&format!("command = '{}'\n", escape_literal(&probe)));
             s.push_str("args = []\n");
+            if let Some(description) = &entry.description {
+                s.push_str(&format!(
+                    "description = \"{}\"\n",
+                    escape_basic(description)
+                ));
+            }
             if let Some(log) = &entry.log_file {
                 s.push_str(&format!("log_file = '{}'\n", escape_literal(log)));
             }
