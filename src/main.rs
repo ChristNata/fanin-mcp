@@ -90,10 +90,10 @@ enum Command {
         /// Check only one server from the selected namespace.
         #[arg(long)]
         server: Option<String>,
-        /// Accepted for the Phase B2 capability cache; unused by this preflight.
+        /// Skip cache reads while refreshing the successful preflight cache.
         #[arg(long)]
         refresh_cache: bool,
-        /// Accepted for the Phase B2 capability cache; unused by this preflight.
+        /// Suppress capability-cache writes after a successful preflight.
         #[arg(long)]
         no_cache_write: bool,
     },
@@ -188,9 +188,9 @@ async fn main() -> ExitCode {
         Command::Check {
             json,
             server,
-            refresh_cache: _refresh_cache,
-            no_cache_write: _no_cache_write,
-        } => check::run(config, json, server).await,
+            refresh_cache,
+            no_cache_write,
+        } => check::run(config, json, server, refresh_cache, no_cache_write).await,
         Command::Cred { action } => run_cred(action, credential_store),
     }
 }

@@ -3,9 +3,9 @@
 //! GOTCHA #1: stdout is the MCP transport. Nothing in this module writes to
 //! stdout; all diagnostics go to stderr via `tracing`.
 //!
-//! The static descriptions below are FINAL design (D-003), copied verbatim
-//! from `tests/common/expectations.rs` / `master.md` §Required Pattern. They
-//! are not placeholder text and must not drift from the expectations file.
+//! The static description prefixes below are FINAL design (D-003), copied
+//! verbatim from `tests/common/expectations.rs` / `master.md` §Required
+//! Pattern. `list_tools` may append a configured, advisory ToC suffix.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl Aggregator {
         }
     }
 
-    /// Builds the three meta-tools, adding a config-only table of contents when available.
+    /// Builds the three meta-tools, adding a configured table of contents when available.
     fn meta_tools(&self) -> Vec<Tool> {
         let toc = self.configured_toc();
         vec![
@@ -74,6 +74,7 @@ impl Aggregator {
         let registry = self.registry.as_ref()?;
         let namespace = self.namespace.as_ref()?;
         let config = registry.toml_config();
+        let cache_summaries = crate::check::matching_cache_tool_summaries(config, namespace);
         let mut toc = String::from(TOC_HEADER);
         let mut has_entry = false;
 
@@ -84,10 +85,34 @@ impl Aggregator {
                 .and_then(|server_config| server_config.description.as_deref())
                 .map(sanitize_list_row_description)
                 .filter(|description| !description.is_empty());
-            let entry = match description {
+            let mut entry = match description {
                 Some(description) => format!("- {server}: {description}\n"),
                 None => format!("- {server}\n"),
             };
+            if let Some(tools) = cache_summaries.get(&server) {
+                let summaries = tools
+                    .iter()
+                    // Authorization remains the namespace query, never the
+                    // cache. Sanitize cached upstream-authored display text
+                    // before it enters either advertisement surface.
+                    .filter(|(name, _)| namespace.is_tool_allowed(&server, name))
+                    .map(|(name, description)| {
+                        let name = sanitize_upstream_identifier(name);
+                        let description = sanitize_list_row_description(description);
+                        if description.is_empty() {
+                            name
+                        } else {
+                            format!("{name} — {description}")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !summaries.is_empty() {
+                    entry = entry.trim_end().to_string();
+                    entry.push_str(" (tools: ");
+                    entry.push_str(&summaries.join(", "));
+                    entry.push_str(")\n");
+                }
+            }
 
             if toc.len() + entry.len() > INSTRUCTIONS_BUDGET {
                 break;
@@ -112,7 +137,7 @@ impl ServerHandler for Aggregator {
         }
     }
 
-    /// Return exactly the three meta-tools with the final static descriptions.
+    /// Returns exactly the three meta-tools with static prefixes and a ToC suffix.
     ///
     /// No upstream fan-out: `tools/list` is fully static (D-002, D-003,
     /// GOTCHA #7). A client sends it at every session start; any upstream touch
