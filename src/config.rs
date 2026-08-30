@@ -14,6 +14,7 @@
 //! transport = "stdio"          # optional; defaults to "stdio"
 //! command = '<path>'           # required for stdio
 //! args = []                    # optional; default empty
+//! description = "..."          # optional human-readable capability summary
 //! cwd = '<path>'               # optional; stdio child working directory; may contain ${VAR}
 //! timeout_secs = 60            # optional; default 60 (Phase 2 parses, Phase 3 wraps)
 //! log_file = '<path>'          # optional
@@ -107,6 +108,9 @@ pub struct ServerConfig {
     /// Spawn args. Optional; defaults to an empty vector.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional human-readable capability description.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Optional stdio child working directory.
     ///
     /// When present for stdio upstreams this is resolved at connect time using
