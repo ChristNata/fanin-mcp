@@ -18,10 +18,13 @@ mod common;
 // Compile the production config model into this integration crate so config
 // data-model tests can assert deserialized fields directly. This binary-only
 // package has no library target to import.
+#[allow(dead_code)] // Production module included for data-model tests; not every item is exercised here.
 #[path = "../../src/config.rs"]
 mod config_model;
+#[allow(dead_code)] // Production module included for data-model tests; not every item is exercised here.
 #[path = "../../src/credentials.rs"]
 mod credentials;
+#[allow(dead_code)] // Production module included for data-model tests; not every item is exercised here.
 #[path = "../../src/error.rs"]
 mod error;
 
