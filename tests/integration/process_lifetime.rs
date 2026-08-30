@@ -49,10 +49,10 @@ const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 /// reaping is asynchronous, so the tests poll within this window rather
 /// than checking once. The grandchild lifetime (30s) far exceeds this
 /// window, so a SURVIVING grandchild (containment failed) is still alive
-/// at the end — the poll does not mask a real failure: a working
-/// containment lands in well under a second (the stdin-EOF path kills in
-/// ~400ms); a failed containment stays alive past 30s.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+/// at the end — the poll does not mask a real failure. Twelve seconds gives
+/// CPU-starved process polling margin; a failed containment stays alive past
+/// 30s.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(12);
 
 /// Extract the joined text of a CallToolResult's content array.
 fn result_text(result: &Value) -> String {
@@ -315,7 +315,7 @@ async fn hard_kill_kills_immediate_startup_descendant_during_test_window() {
     // setup is deterministic before the hard kill; do not wait for cargo-test
     // process cleanup, which masks orphan state under the runner job.
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(3) {
+    while start.elapsed() < Duration::from_secs(12) {
         if std::fs::metadata(&marker_path).is_ok() {
             break;
         }

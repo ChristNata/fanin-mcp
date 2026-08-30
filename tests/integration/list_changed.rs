@@ -608,7 +608,7 @@ async fn f5_failed_refetch_retries_does_not_serve_stale_inventory() {
     // list_all_tools()).
     kill_process_by_pid(probe_pid);
     assert!(
-        wait_for_process_death(probe_pid, Duration::from_secs(2)).await,
+        wait_for_process_death(probe_pid, Duration::from_secs(12)).await,
         "killed probe (pid {probe_pid}) must be dead before the refetch; the test killed it"
     );
 

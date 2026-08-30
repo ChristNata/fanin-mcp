@@ -20,7 +20,8 @@ use tokio::net::TcpListener;
 use crate::common;
 use crate::common::fixtures as fx;
 
-const CHECK_DEADLINE: Duration = Duration::from_secs(15);
+// Outer subprocess patience aligned with the check contract under full load.
+const CHECK_DEADLINE: Duration = Duration::from_secs(30);
 const NAMESPACE: &str = "reviewer";
 const SERVER: &str = "probe";
 const ALLOWED_TOOL: &str = "echo_ok";

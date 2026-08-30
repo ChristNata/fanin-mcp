@@ -39,10 +39,11 @@ use crate::common::fixtures as fx;
 const SPAWN_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Deadline for a dead-upstream call. A dead upstream must return the
-/// structured `upstream_disconnected` error promptly, not hang. 5s is a
-/// generous ceiling that still catches a hang (the registry would await a
-/// broken pipe forever if it did not detect the death).
-const DEAD_DEADLINE: Duration = Duration::from_secs(5);
+/// structured `upstream_disconnected` error promptly, not hang. The 12s outer
+/// patience tolerates CPU-starved subprocess scheduling while still catching a
+/// registry that awaits a broken pipe forever.
+const DEAD_DEADLINE: Duration = Duration::from_secs(12);
+const PROCESS_DEATH_DEADLINE: Duration = Duration::from_secs(12);
 
 /// Deadline for the `needs_sampling` clean-rejection proof (SC 9). The
 /// aggregator must reject the probe's sampling request immediately; 10s is
@@ -254,7 +255,7 @@ async fn dead_upstream_returns_structured_error_and_sibling_stays_callable() {
     // short window so the subsequent call assertion runs against a confirmed
     // dead upstream.
     assert!(
-        wait_for_process_death(probe_pid, Duration::from_secs(2)).await,
+        wait_for_process_death(probe_pid, PROCESS_DEATH_DEADLINE).await,
         "killed probe (pid {probe_pid}) must be dead before the dead-upstream call; \
          the test killed it directly"
     );

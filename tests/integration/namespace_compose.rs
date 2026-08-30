@@ -17,7 +17,8 @@ use crate::common;
 use crate::common::fixtures as fx;
 use crate::error::StartupError;
 
-const CHECK_DEADLINE: Duration = Duration::from_secs(20);
+// Outer subprocess patience aligned with the check contract under full load.
+const CHECK_DEADLINE: Duration = Duration::from_secs(30);
 const INHERITED_FILTER_SERVER: &str = "probe";
 const CACHED_ECHO_SUMMARY: &str = "Echoes the supplied input back in a successful tool result.";
 

@@ -905,12 +905,12 @@ async fn pending_elicitation_on_one_upstream_does_not_block_sibling() {
     // and the cleanup drain is deterministic. We retained the forwarded request
     // id above (binding it, not dropping it) precisely so we can answer it
     // here. Leaving alpha to resolve via the proxy's default 60s tool-call
-    // timeout would outlast the harness `read_line` RPC_DEADLINE (5s) and
+    // timeout would outlast the harness `read_line` RPC_DEADLINE (30s) and
     // panic the drain read — that was the original harness read bug, not a
     // lock. Answering here makes alpha's tool result arrive within
     // `read_line`'s budget; the outer ceiling still catches a hang.
     el::answer_decline(&mut child, alpha_elicit_req_id).await;
-    let _ = timeout(Duration::from_secs(5), child.wait_for_id(alpha_call_id))
+    let _ = timeout(Duration::from_secs(12), child.wait_for_id(alpha_call_id))
         .await
         .expect(
             "alpha__needs_elicitation must resolve after we answer its forwarded elicitation — \

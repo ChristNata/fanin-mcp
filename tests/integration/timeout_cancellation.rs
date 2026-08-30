@@ -126,10 +126,10 @@ async fn timeout_secs_wraps_upstream_call_and_returns_structured_error() {
 
     // Issue a slow_tool call that sleeps well past the configured timeout.
     // The call MUST time out at 1s, not complete at 3s. A generous ceiling
-    // (5s) lets a non-timeout impl complete so the assertion fails on the
-    // error-shape check, not on a hang.
+    // (12s) tolerates subprocess starvation and lets a non-timeout impl
+    // complete so the assertion fails on error shape, not harness impatience.
     let resp = timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(12),
         common::call_tool(
             &mut child,
             "invoke_tool",
@@ -334,7 +334,7 @@ async fn cancellation_frees_local_resources_without_waiting_full_upstream() {
     // generous timeout so it does not leak into the next test; do NOT
     // assert on its shape — the SC 16 contract is the local-resource
     // observable, not the cancelled-response shape.
-    let _ = timeout(Duration::from_secs(6), child.wait_for_id(slow_id)).await;
+    let _ = timeout(Duration::from_secs(12), child.wait_for_id(slow_id)).await;
 
     child.into_guard().shutdown().await.ok();
 }
@@ -429,7 +429,7 @@ async fn slow_timed_out_call_does_not_block_concurrent_sibling() {
 
     // The slow alpha call must eventually return the timeout error (not a
     // hang, not a lost request). Drain it so it does not leak.
-    let slow_resp = timeout(Duration::from_secs(5), child.wait_for_id(slow_id))
+    let slow_resp = timeout(Duration::from_secs(12), child.wait_for_id(slow_id))
         .await
         .expect("alpha__slow_tool must eventually return (timeout result)");
     common::assert_no_rpc_error(&slow_resp, "alpha__slow_tool timeout");

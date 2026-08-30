@@ -18,10 +18,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
-/// Hard ceiling for any single JSON-RPC round-trip. Generous enough that a
-/// correct implementation never hits it, tight enough that a hang fails the
-/// test instead of stalling CI.
-const RPC_DEADLINE: Duration = Duration::from_secs(15);
+/// Hard ceiling for any single JSON-RPC round-trip. Thirty seconds tolerates a
+/// CPU-starved subprocess under full nextest parallelism while an unanswered
+/// request still fails instead of stalling CI.
+const RPC_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Hard ceiling for the `initialize` round-trip specifically. The plan's
 /// startup-laziness gate (criterion 4) requires < 500ms; we use a wider

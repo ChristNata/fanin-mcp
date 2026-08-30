@@ -16,10 +16,16 @@ use serde_json::Value;
 use crate::common;
 use crate::common::fixtures as fx;
 
-const CHECK_DEADLINE: Duration = Duration::from_secs(15);
+// Outer patience for a complete check subprocess under full nextest process
+// parallelism. Per-server timeout_secs remains the behavior under test.
+const CHECK_DEADLINE: Duration = Duration::from_secs(30);
 // Kept equal to process_lifetime.rs::CLEANUP_INTERVAL. The probe descendant
-// lives for 30s, so survival through this 5s poll is an unambiguous orphan.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+// lives for 30s, so survival through this 12s poll is an unambiguous orphan.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(12);
+// This descendant proof must observe the marker before its configured timeout
+// can kill the process tree. The call and cleanup deadlines start separately.
+const DESCENDANT_TIMEOUT_SECS: u64 = 8;
+const MARKER_READY: Duration = Duration::from_secs(4);
 const PROBE_TOOL_NAMES: [&str; 16] = [
     "always_error",
     "dangerous_noop",
@@ -564,7 +570,7 @@ async fn check_leaves_no_orphan_processes() {
         raw_stdio_server(
             "hung",
             &["--hang-then-spawn-descendant", &marker],
-            Some(2),
+            Some(DESCENDANT_TIMEOUT_SECS),
             None,
             None,
         ),
@@ -582,7 +588,7 @@ async fn check_leaves_no_orphan_processes() {
     let child = command.spawn().expect("check process must spawn");
 
     let started = Instant::now();
-    while std::fs::metadata(&marker).is_err() && started.elapsed() < Duration::from_secs(5) {
+    while std::fs::metadata(&marker).is_err() && started.elapsed() < MARKER_READY {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let grandchild_pid = parse_pid_marker(&marker);

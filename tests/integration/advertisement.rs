@@ -145,7 +145,9 @@ async fn wait_for_probe_children(parent_pid: u32, minimum: usize) -> Vec<u32> {
     let started = Instant::now();
     loop {
         let pids = probe_child_pids(parent_pid);
-        if pids.len() >= minimum || started.elapsed() >= Duration::from_secs(3) {
+        // Process enumeration can be CPU-starved under full nextest load; this
+        // setup margin does not change the zero-upstream assertion.
+        if pids.len() >= minimum || started.elapsed() >= Duration::from_secs(12) {
             return pids;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

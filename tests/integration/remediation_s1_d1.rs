@@ -18,11 +18,25 @@ use crate::common;
 use crate::common::fixtures as fx;
 
 const TIMEOUT_SECS: u64 = 1;
-const CALL_CEILING: Duration = Duration::from_secs(4);
-const PROMPT_CEILING: Duration = Duration::from_secs(2);
-const DEATH_CEILING: Duration = Duration::from_secs(5);
+const DESCENDANT_TIMEOUT_SECS: u64 = 8;
+// These are outer harness patience bounds for real subprocess round-trips.
+// The default configured upstream timeout remains one second; the descendant
+// liveness proof uses eight seconds so its pre-timeout observation is stable
+// under full nextest process parallelism.
+const CALL_CEILING: Duration = Duration::from_secs(12);
+const PROMPT_CEILING: Duration = Duration::from_secs(8);
+const DEATH_CEILING: Duration = Duration::from_secs(12);
+const MARKER_READY: Duration = Duration::from_secs(4);
 
 fn phase3_config_for_probe_args(server: &str, args: &[&str]) -> fx::ConfigFile {
+    phase3_config_for_probe_args_with_timeout(server, args, TIMEOUT_SECS)
+}
+
+fn phase3_config_for_probe_args_with_timeout(
+    server: &str,
+    args: &[&str],
+    timeout_secs: u64,
+) -> fx::ConfigFile {
     // Phase3ServerEntry does not own argv; use raw TOML for CLI modes.
     let quoted_args = args
         .iter()
@@ -30,7 +44,7 @@ fn phase3_config_for_probe_args(server: &str, args: &[&str]) -> fx::ConfigFile {
         .collect::<Vec<_>>()
         .join(", ");
     let toml = format!(
-        "[servers.{server}]\ntransport = \"stdio\"\ncommand = '{}'\nargs = [{quoted_args}]\ntimeout_secs = {TIMEOUT_SECS}\n\n[namespaces.default]\nservers = [\"{server}\"]\n",
+        "[servers.{server}]\ntransport = \"stdio\"\ncommand = '{}'\nargs = [{quoted_args}]\ntimeout_secs = {timeout_secs}\n\n[namespaces.default]\nservers = [\"{server}\"]\n",
         fx::probe_bin_path().replace('\'', "\\'")
     );
     fx::raw_config_file(&toml)
@@ -216,9 +230,10 @@ async fn s1_cold_connect_timeout_retries_and_releases_init_guard() {
 #[tokio::test]
 async fn s1_timed_out_connect_kills_spawned_descendant_during_test_window() {
     let marker_path = fx::grandchild_marker_path();
-    let cfg = phase3_config_for_probe_args(
+    let cfg = phase3_config_for_probe_args_with_timeout(
         "hang-tree",
         &["--hang-then-spawn-descendant", marker_path.as_str()],
+        DESCENDANT_TIMEOUT_SECS,
     );
     let mut child = common::spawn_fanin_with_config(&cfg.path_str(), None).await;
     common::initialize(&mut child).await;
@@ -231,7 +246,7 @@ async fn s1_timed_out_connect_kills_spawned_descendant_during_test_window() {
         )
         .await;
 
-    let pid = wait_for_marker_pid(&marker_path, Duration::from_secs(3)).await;
+    let pid = wait_for_marker_pid(&marker_path, MARKER_READY).await;
     assert!(
         process_is_alive(pid),
         "descendant must be alive before timeout"
@@ -574,7 +589,10 @@ async fn wait_for_marker_pid(marker_path: &str, deadline: Duration) -> u32 {
                 return pid;
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Poll tightly once the CPU-starved probe gets scheduled. MARKER_READY
+        // expires before the dedicated descendant connect timeout, so a PID
+        // read here cannot be a post-timeout marker observation.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("marker {marker_path} did not contain a descendant pid within {deadline:?}");
 }

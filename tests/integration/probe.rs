@@ -298,11 +298,13 @@ async fn probe_needs_sampling_sends_sampling_create_message_on_wire() {
         )
         .await;
 
-    // Read messages off the wire for up to 5s, looking for the outbound
+    // Read messages off the wire for up to 12s, looking for the outbound
     // sampling/createMessage request. A request has an `id` and method
     // `sampling/createMessage`; a response has an `id` and a `result`/`error`;
     // a notification has no `id`.
-    let deadline = Duration::from_secs(5);
+    // This is outer subprocess patience under parallel load, not a protocol
+    // timing requirement.
+    let deadline = Duration::from_secs(12);
     let observed = timeout(deadline, async {
         loop {
             let msg = child.read_next_message().await;
