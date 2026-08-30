@@ -33,6 +33,9 @@ Creds duplicated per project/CLI        Creds once, in the OS keychain
 - **One aggregator, many backends.** CC/OC spawn `fanin-mcp` as their single MCP server. The aggregator owns all upstream connections internally. Per-session process: no daemon, no ports, no shared state. Session ends → stdin EOF → all upstreams torn down.
 - **Progressive disclosure.** The LLM sees 3 meta-tools (`list_tools`, `get_tool_schema`, `invoke_tool`). Tool inventories and full schemas are fetched on demand, entering context as compactable tool *results*, not permanent tool definitions.
 - **Namespace-based access control.** `--namespace <id>` scopes which servers (and optionally which tools per server) are visible. This is the primary permission layer.
+- **Capability advertisement.** `initialize.instructions` provides a compact
+  configured-server table of contents, with the `list_tools` description as a
+  fallback. It uses configured descriptions and never spawns an upstream.
 - **Lazy connections.** Upstreams are spawned/connected on the first tool call that targets them — never at startup.
 - **Streamable HTTP is loopback-only in v1.0.0.** `transport = "streamable-http"` supports loopback `http://` upstreams only; no TLS backend is linked. Remote servers are reached exclusively via stdio/npx upstreams (e.g. `npx -y @upstash/context7-mcp`).
 - **No silent hangs on bidirectional traffic.** Upstream `elicitation/create` forwards to the downstream client **only when that client declared elicitation capability** (capability-gated, D-020); on timeout/disconnect/cancel the outcome resolves to a safe non-accept, never accept. `sampling/createMessage` is still rejected and `roots/list` returns empty — sampling and roots forwarding are planned for a later v1.1 slice. Upstreams never hang waiting on the proxy.
@@ -49,7 +52,7 @@ Creds duplicated per project/CLI        Creds once, in the OS keychain
 # Build
 cargo build --release
 
-# Create a config and pass its path with --config
+# Config-backed serve and check require --config; no default config path is resolved.
 # Suggested locations you can point --config at:
 # ~/.config/fanin-mcp/config.toml          (Linux/macOS)
 # %APPDATA%\fanin-mcp\config.toml          (Windows)
@@ -76,6 +79,7 @@ explicitly in that server's `env` table.
 transport = "stdio"
 command = "npx"
 args = ["-y", "@upstash/context7-mcp"]
+description = "Current library and API documentation"
 
 [servers.context7.env]
 PATH = "${PATH}"
@@ -87,6 +91,67 @@ TEMP = "${TEMP}"
 USERPROFILE = "${USERPROFILE}"
 COMSPEC = "${COMSPEC}"
 ```
+
+## v1.2 capability discovery
+
+### Capability advertisement
+
+At session initialization, clients receive a compact table of contents of the
+selected namespace's configured servers through MCP `initialize.instructions`.
+The `list_tools` meta-tool description carries the same information as a
+fallback for clients that do not surface instructions. Add an optional
+`description` to `[servers.<name>]` to make the table useful. Neither path
+contacts or spawns an upstream; the 3-meta-tool surface remains unchanged.
+
+### Preflight with `check`
+
+Run `check` before relying on a configuration:
+
+```bash
+fanin-mcp check --config <cfg> --namespace <ns> [--json] [--server <name>] \
+  [--refresh-cache] [--no-cache-write]
+```
+
+It connects each visible upstream, verifies initialization and `tools/list`,
+and confirms configured allowlisted tools exist. `--json` emits a structured
+result, and any failure exits non-zero. The command cleans up every upstream
+process tree. It is an operator readiness check, not a workflow gate.
+
+### Composable namespaces
+
+Namespaces may extend one or more parent namespaces. Effective servers are
+unioned, while tool filters intersect: composition is least-privilege and can
+never widen a parent's restriction. Unknown parents and cycles fail config
+validation.
+
+```toml
+[namespaces.repo-read]
+servers = ["repo"]
+tools.repo = ["read_file", "search"]
+
+[namespaces.db-read]
+servers = ["db"]
+tools.db = ["query", "list_tables"]
+
+[namespaces.reviewer]
+extends = ["repo-read", "db-read"]
+
+[namespaces.reviewer.tools]
+repo = ["read_file"]  # intersects repo-read; search stays unavailable
+```
+
+`reviewer` sees both servers, but only `repo__read_file` and the inherited
+database read tools. A disjoint intersection remains an explicit no-tools
+filter rather than becoming unrestricted.
+
+### Advisory capability cache
+
+A successful full-namespace `check` writes a reconstructible, non-secret cache
+to `{cache_dir}/fanin-mcp/capabilities/<ns>.json`. Set `FANIN_MCP_CACHE_DIR` to
+replace `{cache_dir}`. `serve` may read a matching cache to enrich its
+advertisement with compact tool summaries. The cache is advisory display
+metadata, never authorization: `invoke_tool` always checks the live namespace
+ACL.
 
 ## How the LLM uses it
 

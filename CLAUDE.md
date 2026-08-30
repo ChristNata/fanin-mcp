@@ -33,6 +33,11 @@ Flat single-stack Rust project. One binary crate; flat `src/` module layout
 `namespace.rs`, `credentials.rs`, `error.rs`, `config.rs`) plus an in-repo
 probe-server fixture under `tests/probe-server/`. No workspace, no sub-crates.
 
+CLI subcommands are `serve` (default), `check`, and `cred set|list|rm`.
+Config-backed `serve` and `check` require `--config`; optional server
+`description`s enrich lazy capability advertisement, and namespaces compose
+least-privilege access through `extends`.
+
 Plan scope: flat
 
 ## Design canon — the `docs/` vault
