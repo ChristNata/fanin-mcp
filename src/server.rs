@@ -56,13 +56,47 @@ impl Aggregator {
         }
     }
 
-    /// Build the three static meta-tools.
-    fn meta_tools() -> Vec<Tool> {
+    /// Builds the three meta-tools, adding a config-only table of contents when available.
+    fn meta_tools(&self) -> Vec<Tool> {
+        let toc = self.configured_toc();
         vec![
-            list_tools_tool(),
+            list_tools_tool(toc.as_deref()),
             get_tool_schema_tool(),
             invoke_tool_tool(),
         ]
+    }
+
+    /// Builds the configured server table of contents without inventorying upstreams.
+    fn configured_toc(&self) -> Option<String> {
+        const INSTRUCTIONS_BUDGET: usize = 2_000;
+        const TOC_HEADER: &str = "\n\nConfigured servers:\n";
+
+        let registry = self.registry.as_ref()?;
+        let namespace = self.namespace.as_ref()?;
+        let config = registry.toml_config();
+        let mut toc = String::from(TOC_HEADER);
+        let mut has_entry = false;
+
+        for server in namespace.allowed_servers() {
+            let description = config
+                .servers
+                .get(&server)
+                .and_then(|server_config| server_config.description.as_deref())
+                .map(sanitize_list_row_description)
+                .filter(|description| !description.is_empty());
+            let entry = match description {
+                Some(description) => format!("- {server}: {description}\n"),
+                None => format!("- {server}\n"),
+            };
+
+            if toc.len() + entry.len() > INSTRUCTIONS_BUDGET {
+                break;
+            }
+            toc.push_str(&entry);
+            has_entry = true;
+        }
+
+        has_entry.then_some(toc)
     }
 }
 
@@ -70,8 +104,12 @@ impl ServerHandler for Aggregator {
     /// Advertise server info and the `tools` capability (GOTCHA #8).
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder().enable_tools().build();
-        InitializeResult::new(capabilities)
-            .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
+        let info = InitializeResult::new(capabilities)
+            .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")));
+        match self.configured_toc() {
+            Some(toc) => info.with_instructions(toc),
+            None => info,
+        }
     }
 
     /// Return exactly the three meta-tools with the final static descriptions.
@@ -84,7 +122,7 @@ impl ServerHandler for Aggregator {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(Self::meta_tools())))
+        std::future::ready(Ok(ListToolsResult::with_all_items(self.meta_tools())))
     }
 
     /// Return a structured not-implemented `CallToolResult` for any tool name.
@@ -476,10 +514,14 @@ fn sanitize_metadata_value(v: &serde_json::Value) -> serde_json::Value {
 }
 
 /// `list_tools` — optional `server` string filter.
-fn list_tools_tool() -> Tool {
+fn list_tools_tool(toc: Option<&str>) -> Tool {
+    let description = match toc {
+        Some(toc) => format!("{LIST_TOOLS_DESC}{toc}"),
+        None => LIST_TOOLS_DESC.to_string(),
+    };
     Tool::new(
         "list_tools",
-        LIST_TOOLS_DESC,
+        description,
         optional_string_object_schema(&["server"]),
     )
 }

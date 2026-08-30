@@ -95,6 +95,11 @@ impl Registry {
         self.config.servers.contains_key(server)
     }
 
+    /// Returns the validated configuration without connecting an upstream.
+    pub fn toml_config(&self) -> &TomlConfig {
+        self.config.as_ref()
+    }
+
     /// Populate the shared downstream peer cell after the downstream initialize
     /// handshake completes. Called once from `main.rs` after
     /// `aggregator.serve(stdio())` returns `running`. The `OnceLock` means the
